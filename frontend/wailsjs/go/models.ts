@@ -96,6 +96,44 @@ export namespace adb {
 	        this.link = source["link"];
 	    }
 	}
+	export class RunningService {
+	    package: string;
+	    label?: string;
+	    service: string;
+	    component: string;
+	    process?: string;
+	    pid?: number;
+	    userId: number;
+	    client?: string;
+	    foreground: boolean;
+	    startRequested: boolean;
+	    system: boolean;
+	    createTime?: string;
+	    lastActivity?: string;
+	    baseDir?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RunningService(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.package = source["package"];
+	        this.label = source["label"];
+	        this.service = source["service"];
+	        this.component = source["component"];
+	        this.process = source["process"];
+	        this.pid = source["pid"];
+	        this.userId = source["userId"];
+	        this.client = source["client"];
+	        this.foreground = source["foreground"];
+	        this.startRequested = source["startRequested"];
+	        this.system = source["system"];
+	        this.createTime = source["createTime"];
+	        this.lastActivity = source["lastActivity"];
+	        this.baseDir = source["baseDir"];
+	    }
+	}
 
 }
 

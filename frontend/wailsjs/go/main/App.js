@@ -118,6 +118,10 @@ export function ListRemoteEntries(arg1, arg2) {
   return window['go']['main']['App']['ListRemoteEntries'](arg1, arg2);
 }
 
+export function ListRunningServices(arg1) {
+  return window['go']['main']['App']['ListRunningServices'](arg1);
+}
+
 export function ListScrcpy() {
   return window['go']['main']['App']['ListScrcpy']();
 }
@@ -212,6 +216,10 @@ export function StopScrcpy(arg1) {
 
 export function StopScreenRecord(arg1) {
   return window['go']['main']['App']['StopScreenRecord'](arg1);
+}
+
+export function StopService(arg1, arg2) {
+  return window['go']['main']['App']['StopService'](arg1, arg2);
 }
 
 export function Tcpip(arg1, arg2) {

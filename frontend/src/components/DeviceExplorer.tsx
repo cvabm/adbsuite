@@ -368,11 +368,6 @@ export default function DeviceExplorer({ serial, busy, setBusy, log }: Props) {
 
   return (
     <section className="panel explorer-panel">
-      <div className="explorer-header">
-        <h2>Device Explorer</h2>
-        <span className="muted explorer-sub">设备文件浏览器 · 类似 Android Studio</span>
-      </div>
-
       <div className="explorer-layout">
         <aside className="explorer-sidebar">
           <div className="explorer-side-title">快捷路径</div>

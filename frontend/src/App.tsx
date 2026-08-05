@@ -15,6 +15,8 @@ import {
   DisablePackage,
   EnablePackage,
   IsPackageDebuggable,
+  ListRunningServices,
+  StopService,
   Screenshot,
   StartScreenRecord,
   StopScreenRecord,
@@ -45,6 +47,7 @@ type Tab =
   | "devices"
   | "mirror"
   | "apps"
+  | "services"
   | "files"
   | "tools"
   | "logcat"
@@ -70,6 +73,23 @@ type Pkg = {
   uninstalled?: boolean;
 };
 type AppKindFilter = "third" | "system" | "disabled" | "uninstalled" | "all";
+type SvcKindFilter = "all" | "third" | "system" | "foreground";
+type RunningSvc = {
+  package: string;
+  label?: string;
+  service: string;
+  component: string;
+  process?: string;
+  pid?: number;
+  userId?: number;
+  client?: string;
+  foreground?: boolean;
+  startRequested?: boolean;
+  system?: boolean;
+  createTime?: string;
+  lastActivity?: string;
+  baseDir?: string;
+};
 type Settings = {
   adbPath: string;
   scrcpyPath: string;
@@ -90,6 +110,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "devices", label: "设备" },
   { id: "mirror", label: "投屏" },
   { id: "apps", label: "应用" },
+  { id: "services", label: "服务" },
   { id: "files", label: "文件" },
   { id: "tools", label: "工具" },
   { id: "logcat", label: "日志" },
@@ -148,6 +169,11 @@ export default function App() {
   const [pkgName, setPkgName] = useState("");
   /** null = unknown / not ready; true = debuggable build */
   const [pkgDebuggable, setPkgDebuggable] = useState<boolean | null>(null);
+  const [services, setServices] = useState<RunningSvc[]>([]);
+  const [svcFilter, setSvcFilter] = useState("");
+  const [svcKind, setSvcKind] = useState<SvcKindFilter>("all");
+  const [svcSelected, setSvcSelected] = useState(""); // component key
+  const [svcAutoRefresh, setSvcAutoRefresh] = useState(false);
   const devicesSig = useRef("");
   const logPausedRef = useRef(false);
 
@@ -312,6 +338,76 @@ export default function App() {
     [packages, pkgName]
   );
 
+  const filteredServices = useMemo(() => {
+    const q = svcFilter.trim().toLowerCase();
+    return services.filter((s) => {
+      if (svcKind === "third" && s.system) return false;
+      if (svcKind === "system" && !s.system) return false;
+      if (svcKind === "foreground" && !s.foreground) return false;
+      if (!q) return true;
+      const hay = [
+        s.label,
+        s.package,
+        s.service,
+        s.component,
+        s.process,
+        s.client,
+        s.pid != null && s.pid !== 0 ? String(s.pid) : "",
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(q);
+    });
+  }, [services, svcFilter, svcKind]);
+
+  const selectedSvc = useMemo(
+    () => services.find((s) => s.component === svcSelected) || null,
+    [services, svcSelected]
+  );
+
+  const svcCounts = useMemo(() => {
+    let third = 0;
+    let system = 0;
+    let foreground = 0;
+    for (const s of services) {
+      if (s.system) system++;
+      else third++;
+      if (s.foreground) foreground++;
+    }
+    return { all: services.length, third, system, foreground };
+  }, [services]);
+
+  // Clear service list when device changes.
+  useEffect(() => {
+    setServices([]);
+    setSvcSelected("");
+  }, [selected]);
+
+  // Optional auto-refresh while on the services tab.
+  useEffect(() => {
+    if (!svcAutoRefresh || tab !== "services" || !selected) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const list = (await ListRunningServices(selected)) as RunningSvc[];
+        if (!cancelled) {
+          setServices(list || []);
+          setSvcSelected((cur) =>
+            cur && (list || []).some((s) => s.component === cur) ? cur : ""
+          );
+        }
+      } catch {
+        /* ignore auto-refresh errors */
+      }
+    };
+    const id = window.setInterval(tick, 8000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [svcAutoRefresh, tab, selected]);
+
   // Detect whether selected package is a debuggable build (dumpsys flags|DEBUGGABLE).
   // No intermediate "检测中" UI — only swap to 是/否 when the result arrives.
   useEffect(() => {
@@ -435,7 +531,6 @@ export default function App() {
         <div className="content">
           {tab === "devices" && (
             <section className="panel">
-              <h2>设备列表</h2>
               <div className="table-wrap">
                 <table>
                   <thead>
@@ -514,8 +609,6 @@ export default function App() {
 
           {tab === "mirror" && (
             <section className="panel">
-              <h2>投屏（scrcpy）</h2>
-              <p className="hint">使用内置 bin/scrcpy，参数在「设置」中配置。</p>
               <div className="row gap wrap">
                 <button
                   className="btn primary"
@@ -591,10 +684,6 @@ export default function App() {
 
           {tab === "apps" && (
             <section className="panel apps-panel">
-              <h2>应用</h2>
-              <p className="hint">
-                列表显示应用名、包名、versionName、versionCode。支持普通 / 系统 / 被禁用 / 已卸载筛选；可启动、强制停止、卸载或清除数据。系统应用卸载为「当前用户卸载」。首次刷新会读取应用名并缓存。
-              </p>
               <div className="row gap wrap">
                 <label className="chk">
                   <input
@@ -968,6 +1057,255 @@ export default function App() {
             </section>
           )}
 
+          {tab === "services" && (
+            <section className="panel apps-panel">
+              <div className="row gap wrap">
+                <div className="seg" role="tablist" aria-label="服务类型">
+                  {(
+                    [
+                      { id: "all" as const, label: "全部", count: svcCounts.all },
+                      { id: "third" as const, label: "普通应用", count: svcCounts.third },
+                      { id: "system" as const, label: "系统应用", count: svcCounts.system },
+                      {
+                        id: "foreground" as const,
+                        label: "前台",
+                        count: svcCounts.foreground,
+                      },
+                    ] as const
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      className={"seg-btn" + (svcKind === opt.id ? " active" : "")}
+                      onClick={() => setSvcKind(opt.id)}
+                    >
+                      {opt.label}
+                      {services.length > 0 ? (
+                        <span className="seg-count">{opt.count}</span>
+                      ) : null}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  placeholder="搜索应用名 / 包名 / 服务名 / 进程 / PID"
+                  value={svcFilter}
+                  onChange={(e) => setSvcFilter(e.target.value)}
+                  style={{ flex: 1, minWidth: 180 }}
+                />
+                <button
+                  className="btn primary"
+                  disabled={busy || !selected}
+                  onClick={() =>
+                    run("刷新服务", async () => {
+                      if (!needDevice()) return;
+                      const list = (await ListRunningServices(selected)) as RunningSvc[];
+                      setServices(list || []);
+                      if (
+                        svcSelected &&
+                        !(list || []).some((s) => s.component === svcSelected)
+                      ) {
+                        setSvcSelected("");
+                      }
+                    })
+                  }
+                >
+                  刷新列表
+                </button>
+                <label className="chk" title="约每 8 秒自动刷新（仅当前页）">
+                  <input
+                    type="checkbox"
+                    checked={svcAutoRefresh}
+                    onChange={(e) => setSvcAutoRefresh(e.target.checked)}
+                  />
+                  自动刷新
+                </label>
+              </div>
+              <div className="row gap wrap apps-action-bar">
+                <div className="apps-selected muted">
+                  {selectedSvc ? (
+                    <>
+                      <div className="apps-selected-line1">
+                        已选：
+                        <strong className="text-strong">
+                          {selectedSvc.label || selectedSvc.package}
+                        </strong>
+                        <span className="muted" style={{ marginLeft: 6 }}>
+                          · {selectedSvc.service}
+                        </span>
+                        {selectedSvc.foreground ? (
+                          <span className="app-badge fgs">前台</span>
+                        ) : null}
+                        <span
+                          className={
+                            "app-badge " + (selectedSvc.system ? "system" : "user")
+                          }
+                        >
+                          {selectedSvc.system ? "系统" : "普通"}
+                        </span>
+                      </div>
+                      <div className="apps-selected-line2">
+                        <span className="apps-selected-pkg mono">
+                          {selectedSvc.component}
+                        </span>
+                        {selectedSvc.pid ? (
+                          <span className="apps-selected-ver">
+                            PID {selectedSvc.pid}
+                            {selectedSvc.process ? ` · ${selectedSvc.process}` : ""}
+                          </span>
+                        ) : selectedSvc.process ? (
+                          <span className="apps-selected-ver">{selectedSvc.process}</span>
+                        ) : null}
+                      </div>
+                    </>
+                  ) : (
+                    "点击下方列表进行选择"
+                  )}
+                </div>
+                <button
+                  className="btn"
+                  disabled={busy || !selected || !selectedSvc}
+                  onClick={() =>
+                    run("停止服务", async () => {
+                      if (!needDevice() || !selectedSvc) return;
+                      if (
+                        !window.confirm(
+                          `确定停止服务「${selectedSvc.service}」？\n${selectedSvc.component}`
+                        )
+                      ) {
+                        return;
+                      }
+                      await StopService(selected, selectedSvc.component);
+                      const list = (await ListRunningServices(selected)) as RunningSvc[];
+                      setServices(list || []);
+                      setSvcSelected("");
+                    })
+                  }
+                >
+                  停止服务
+                </button>
+                <button
+                  className="btn danger"
+                  disabled={busy || !selected || !selectedSvc}
+                  onClick={() =>
+                    run("强制停止应用", async () => {
+                      if (!needDevice() || !selectedSvc) return;
+                      if (
+                        !window.confirm(
+                          `确定强制停止应用「${selectedSvc.package}」？\n将结束该包下所有进程与服务。`
+                        )
+                      ) {
+                        return;
+                      }
+                      await ForceStopPackage(selected, selectedSvc.package);
+                      const list = (await ListRunningServices(selected)) as RunningSvc[];
+                      setServices(list || []);
+                      setSvcSelected("");
+                    })
+                  }
+                >
+                  强制停止应用
+                </button>
+                <span className="muted" style={{ fontSize: "0.85rem" }}>
+                  共 {filteredServices.length}
+                  {services.length !== filteredServices.length
+                    ? ` / ${services.length}`
+                    : ""}{" "}
+                  条
+                </span>
+              </div>
+              <div className="table-wrap tall apps-list svc-list">
+                <table className="svc-table">
+                  <colgroup>
+                    <col className="svc-col-label" />
+                    <col className="svc-col-name" />
+                    <col className="svc-col-pkg" />
+                    <col className="svc-col-proc" />
+                    <col className="svc-col-pid" />
+                    <col className="svc-col-kind" />
+                    <col className="svc-col-state" />
+                    <col className="svc-col-time" />
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th>应用名</th>
+                      <th>服务</th>
+                      <th>包名</th>
+                      <th>进程</th>
+                      <th>PID</th>
+                      <th>类型</th>
+                      <th>状态</th>
+                      <th>运行时长</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredServices.length === 0 && (
+                      <tr>
+                        <td colSpan={8} className="muted">
+                          {services.length === 0
+                            ? "点「刷新列表」加载运行中的服务"
+                            : "无匹配服务"}
+                        </td>
+                      </tr>
+                    )}
+                    {filteredServices.slice(0, 2000).map((s) => {
+                      const key = s.component || `${s.package}/${s.service}`;
+                      const appName = s.label || s.package;
+                      return (
+                        <tr
+                          key={key + (s.pid || "")}
+                          className={
+                            (svcSelected === s.component ? "row-active " : "") +
+                            (s.system ? "app-row-system" : "app-row-user")
+                          }
+                          style={{ cursor: "pointer" }}
+                          onClick={() => setSvcSelected(s.component)}
+                          title={s.component}
+                        >
+                          <td className="svc-td-label" title={appName}>
+                            {appName}
+                          </td>
+                          <td className="svc-td-name" title={s.service}>
+                            <span className="svc-name">{s.service || "—"}</span>
+                          </td>
+                          <td className="svc-td-pkg mono" title={s.package}>
+                            {s.package}
+                          </td>
+                          <td className="svc-td-proc mono" title={s.process || ""}>
+                            {s.process || "—"}
+                          </td>
+                          <td className="svc-td-pid">
+                            {s.pid != null && s.pid !== 0 ? s.pid : "—"}
+                          </td>
+                          <td className="svc-td-kind">
+                            <span
+                              className={
+                                "app-badge " + (s.system ? "system" : "user")
+                              }
+                            >
+                              {s.system ? "系统" : "普通"}
+                            </span>
+                          </td>
+                          <td className="svc-td-state">
+                            {s.foreground ? (
+                              <span className="app-badge fgs">前台</span>
+                            ) : s.startRequested ? (
+                              <span className="app-badge started">已启动</span>
+                            ) : (
+                              <span className="app-badge bound">绑定</span>
+                            )}
+                          </td>
+                          <td className="svc-td-time" title={s.createTime || ""}>
+                            {s.createTime || "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+
           {tab === "files" && (
             <DeviceExplorer
               serial={selected}
@@ -979,7 +1317,6 @@ export default function App() {
 
           {tab === "tools" && (
             <section className="panel">
-              <h2>工具</h2>
               <div className="row gap wrap">
                 <button
                   className="btn primary"
@@ -1092,15 +1429,6 @@ export default function App() {
               {shellOut && <pre className="tools-result mono">{shellOut}</pre>}
 
               <h3>端口转发</h3>
-              <p className="hint">
-                <strong>Forward</strong>：把电脑上的端口映射到手机。例如电脑访问{" "}
-                <span className="mono">localhost:8080</span>，实际连到手机的 8080（调试手机上的服务时用）。
-                <br />
-                <strong>Reverse</strong>：方向相反，把手机上的端口映射到电脑。例如手机 App 访问{" "}
-                <span className="mono">localhost:8080</span>，实际连到电脑的 8080（手机调试电脑上的后端时用）。
-                <br />
-                填写格式一般为 <span className="mono">tcp:端口号</span>，左侧为本机、右侧为设备侧。
-              </p>
               <div className="row gap wrap">
                 <label className="port-field">
                   <span className="muted">本机 (PC)</span>
@@ -1168,7 +1496,6 @@ export default function App() {
 
           {tab === "logcat" && (
             <section className="panel logcat-panel">
-              <h2>Logcat</h2>
               <div className="row gap wrap">
                 <button
                   className="btn primary"
@@ -1256,7 +1583,6 @@ export default function App() {
 
           {tab === "settings" && settings && (
             <section className="panel">
-              <h2>设置</h2>
               <div className="form">
                 <label>
                   主题

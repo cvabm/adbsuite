@@ -570,6 +570,21 @@ tr.row-active td {
   color: var(--danger, #e05555);
 }
 
+.app-badge.fgs {
+  background: rgba(62, 207, 142, 0.18);
+  color: var(--ok);
+}
+
+.app-badge.started {
+  background: rgba(79, 140, 255, 0.14);
+  color: var(--primary);
+}
+
+.app-badge.bound {
+  background: rgba(139, 149, 168, 0.18);
+  color: var(--muted);
+}
+
 .theme-light .app-badge.disabled {
   background: rgba(100, 100, 110, 0.12);
   color: #6b7280;
@@ -578,6 +593,93 @@ tr.row-active td {
 .theme-light .app-badge.uninstalled {
   background: rgba(200, 50, 50, 0.1);
   color: #c0392b;
+}
+
+.theme-light .app-badge.fgs {
+  background: rgba(15, 107, 66, 0.12);
+  color: var(--ok);
+}
+
+.theme-light .app-badge.bound {
+  background: rgba(42, 49, 66, 0.1);
+  color: var(--muted);
+}
+
+/* Running services table: fixed layout so 包名 stays readable */
+.svc-list.table-wrap {
+  overflow-x: auto;
+}
+
+.svc-table {
+  table-layout: fixed;
+  width: 100%;
+  min-width: 980px;
+}
+
+.svc-col-label {
+  width: 14%;
+}
+.svc-col-name {
+  width: 16%;
+}
+.svc-col-pkg {
+  width: 24%;
+}
+.svc-col-proc {
+  width: 18%;
+}
+.svc-col-pid {
+  width: 64px;
+}
+.svc-col-kind {
+  width: 64px;
+}
+.svc-col-state {
+  width: 72px;
+}
+.svc-col-time {
+  width: 110px;
+}
+
+.svc-table th,
+.svc-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.svc-name {
+  font-weight: 600;
+}
+
+.svc-td-label {
+  font-weight: 600;
+}
+
+.svc-td-pkg {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  color: var(--muted);
+  /* override apps-list word-break:break-all which squeezes this column */
+  word-break: normal;
+}
+
+.svc-td-proc {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.svc-td-pid,
+.svc-td-time {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.svc-td-kind,
+.svc-td-state {
+  text-overflow: clip;
 }
 
 .apps-selected .app-badge {

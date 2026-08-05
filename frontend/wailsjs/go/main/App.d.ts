@@ -64,6 +64,8 @@ export function ListRemoteDir(arg1:string,arg2:string):Promise<string>;
 
 export function ListRemoteEntries(arg1:string,arg2:string):Promise<Array<adb.RemoteEntry>>;
 
+export function ListRunningServices(arg1:string):Promise<Array<adb.RunningService>>;
+
 export function ListScrcpy():Promise<Array<scrcpy.Session>>;
 
 export function ListScreenRecords():Promise<Array<adb.RecordSession>>;
@@ -111,6 +113,8 @@ export function StopLogcat():Promise<void>;
 export function StopScrcpy(arg1:string):Promise<void>;
 
 export function StopScreenRecord(arg1:string):Promise<string>;
+
+export function StopService(arg1:string,arg2:string):Promise<string>;
 
 export function Tcpip(arg1:string,arg2:number):Promise<string>;
 
