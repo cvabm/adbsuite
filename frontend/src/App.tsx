@@ -14,6 +14,7 @@ import {
   ForceStopPackage,
   DisablePackage,
   EnablePackage,
+  IsPackageDebuggable,
   Screenshot,
   StartScreenRecord,
   StopScreenRecord,
@@ -145,6 +146,8 @@ export default function App() {
   const [recording, setRecording] = useState(false);
   const [recordLocal, setRecordLocal] = useState("");
   const [pkgName, setPkgName] = useState("");
+  /** null = unknown / not ready; true = debuggable build */
+  const [pkgDebuggable, setPkgDebuggable] = useState<boolean | null>(null);
   const devicesSig = useRef("");
   const logPausedRef = useRef(false);
 
@@ -308,6 +311,27 @@ export default function App() {
     () => packages.find((p) => p.name === pkgName) || null,
     [packages, pkgName]
   );
+
+  // Detect whether selected package is a debuggable build (dumpsys flags|DEBUGGABLE).
+  // No intermediate "检测中" UI — only swap to 是/否 when the result arrives.
+  useEffect(() => {
+    if (!selected || !pkgName || selectedPkg?.uninstalled) {
+      setPkgDebuggable(null);
+      return;
+    }
+    let cancelled = false;
+    setPkgDebuggable(null);
+    IsPackageDebuggable(selected, pkgName)
+      .then((v) => {
+        if (!cancelled) setPkgDebuggable(!!v);
+      })
+      .catch(() => {
+        if (!cancelled) setPkgDebuggable(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, pkgName, selectedPkg?.uninstalled]);
 
   const appDisplayName = (p: Pkg) => (p.label && p.label.trim()) || p.name;
 
@@ -691,22 +715,30 @@ export default function App() {
                 <div className="apps-selected muted">
                   {selectedPkg ? (
                     <>
-                      已选：
-                      <strong className="text-strong">{appDisplayName(selectedPkg)}</strong>
-                      <span className="apps-selected-pkg">{selectedPkg.name}</span>
-                      {(selectedPkg.versionName ||
-                        (selectedPkg.versionCode != null && selectedPkg.versionCode !== 0)) && (
-                        <span className="apps-selected-ver">
-                          {selectedPkg.versionName || "—"}
-                          {selectedPkg.versionCode != null && selectedPkg.versionCode !== 0
-                            ? ` (${selectedPkg.versionCode})`
-                            : ""}
-                        </span>
-                      )}
-                      {(() => {
-                        const b = appKindBadge(selectedPkg);
-                        return <span className={"app-badge " + b.cls}>{b.text}</span>;
-                      })()}
+                      <div className="apps-selected-line1">
+                        已选：
+                        <strong className="text-strong">{appDisplayName(selectedPkg)}</strong>
+                      </div>
+                      <div className="apps-selected-line2">
+                        <span className="apps-selected-pkg">{selectedPkg.name}</span>
+                        {(selectedPkg.versionName ||
+                          (selectedPkg.versionCode != null &&
+                            selectedPkg.versionCode !== 0)) && (
+                          <span className="apps-selected-ver">
+                            {selectedPkg.versionName || "—"}
+                            {selectedPkg.versionCode != null &&
+                            selectedPkg.versionCode !== 0
+                              ? ` (${selectedPkg.versionCode})`
+                              : ""}
+                          </span>
+                        )}
+                        {(() => {
+                          const b = appKindBadge(selectedPkg);
+                          return (
+                            <span className={"app-badge " + b.cls}>{b.text}</span>
+                          );
+                        })()}
+                      </div>
                     </>
                   ) : (
                     "点击下方列表进行选择"
@@ -855,6 +887,29 @@ export default function App() {
                 >
                   清除数据
                 </button>
+                <span
+                  className={
+                    "apps-debug-status" +
+                    (pkgDebuggable === true
+                      ? " is-debug"
+                      : pkgDebuggable === false
+                        ? " not-debug"
+                        : "")
+                  }
+                  title={
+                    "dumpsys package <包名> | grep -E \"flags|DEBUGGABLE\"\n" +
+                    "输出含 DEBUGGABLE 即为 debug 版本"
+                  }
+                >
+                  是否 debug 版本：
+                  <strong>
+                    {pkgDebuggable === true
+                      ? "是"
+                      : pkgDebuggable === false
+                        ? "否"
+                        : "—"}
+                  </strong>
+                </span>
               </div>
               <div className="table-wrap tall apps-list">
                 <table>

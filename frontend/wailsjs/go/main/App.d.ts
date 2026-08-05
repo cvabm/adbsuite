@@ -48,6 +48,8 @@ export function InstallApk(arg1:string,arg2:string,arg3:boolean,arg4:boolean,arg
 
 export function IsLogcatRunning():Promise<boolean>;
 
+export function IsPackageDebuggable(arg1:string,arg2:string):Promise<boolean>;
+
 export function IsScrcpyRunning(arg1:string):Promise<boolean>;
 
 export function IsScreenRecording(arg1:string):Promise<boolean>;
