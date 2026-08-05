@@ -229,6 +229,10 @@ func (a *App) EnablePackage(serial, pkg string) (string, error) {
 	return a.client.EnablePackage(serial, pkg)
 }
 
+func (a *App) IsPackageDebuggable(serial, pkg string) (bool, error) {
+	return a.client.IsPackageDebuggable(serial, pkg)
+}
+
 // ---------- files (Device Explorer) ----------
 
 func (a *App) PushFile(serial, local, remote string) (string, error) {

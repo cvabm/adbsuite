@@ -462,6 +462,33 @@ func isPmStateFailure(out, want string) bool {
 		strings.Contains(low, "unknown package")
 }
 
+// IsPackageDebuggable reports whether the package was built as debuggable.
+// Logic: dumpsys package <pkg> | grep -E "flags|DEBUGGABLE" — true if output contains DEBUGGABLE.
+func (c *Client) IsPackageDebuggable(serial, pkg string) (bool, error) {
+	pkg = strings.TrimSpace(pkg)
+	if pkg == "" {
+		return false, fmt.Errorf("包名为空")
+	}
+	// Device-side filter (same approach as requested); grep exit 1 on no match is OK.
+	cmd := "dumpsys package " + shellQuote(pkg) + ` | grep -E 'flags|DEBUGGABLE'`
+	res, err := c.Shell(serial, cmd)
+	out := firstNonEmpty(res.Stdout, res.Combined, res.Stderr)
+	if strings.Contains(out, "DEBUGGABLE") {
+		return true, nil
+	}
+	// No DEBUGGABLE in filtered output → not debug. Ignore grep's non-zero exit.
+	if err != nil && strings.TrimSpace(out) == "" {
+		// dumpsys itself may have failed; try unfiltered one-shot for clearer signal
+		res2, err2 := c.Shell(serial, "dumpsys package "+shellQuote(pkg))
+		out2 := firstNonEmpty(res2.Stdout, res2.Combined)
+		if err2 != nil && strings.TrimSpace(out2) == "" {
+			return false, fmt.Errorf("%s", firstNonEmpty(out, err.Error(), "无法读取包信息"))
+		}
+		return strings.Contains(out2, "DEBUGGABLE"), nil
+	}
+	return false, nil
+}
+
 func (c *Client) PackagePath(serial, pkg string) (string, error) {
 	res, err := c.Shell(serial, "pm path "+shellQuote(pkg))
 	if err != nil {

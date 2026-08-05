@@ -86,6 +86,10 @@ export function IsLogcatRunning() {
   return window['go']['main']['App']['IsLogcatRunning']();
 }
 
+export function IsPackageDebuggable(arg1, arg2) {
+  return window['go']['main']['App']['IsPackageDebuggable'](arg1, arg2);
+}
+
 export function IsScrcpyRunning(arg1) {
   return window['go']['main']['App']['IsScrcpyRunning'](arg1);
 }
