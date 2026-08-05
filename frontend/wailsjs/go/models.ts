@@ -29,6 +29,10 @@ export namespace adb {
 	    label: string;
 	    path?: string;
 	    system: boolean;
+	    versionName?: string;
+	    versionCode?: number;
+	    disabled?: boolean;
+	    uninstalled?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new PackageInfo(source);
@@ -40,6 +44,10 @@ export namespace adb {
 	        this.label = source["label"];
 	        this.path = source["path"];
 	        this.system = source["system"];
+	        this.versionName = source["versionName"];
+	        this.versionCode = source["versionCode"];
+	        this.disabled = source["disabled"];
+	        this.uninstalled = source["uninstalled"];
 	    }
 	}
 	export class RecordSession {

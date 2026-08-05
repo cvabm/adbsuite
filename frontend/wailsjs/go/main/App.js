@@ -46,8 +46,20 @@ export function DeviceInfo(arg1) {
   return window['go']['main']['App']['DeviceInfo'](arg1);
 }
 
+export function DisablePackage(arg1, arg2) {
+  return window['go']['main']['App']['DisablePackage'](arg1, arg2);
+}
+
 export function Disconnect(arg1) {
   return window['go']['main']['App']['Disconnect'](arg1);
+}
+
+export function EnablePackage(arg1, arg2) {
+  return window['go']['main']['App']['EnablePackage'](arg1, arg2);
+}
+
+export function ForceStopPackage(arg1, arg2) {
+  return window['go']['main']['App']['ForceStopPackage'](arg1, arg2);
 }
 
 export function ForegroundActivity(arg1) {
@@ -80,6 +92,10 @@ export function IsScrcpyRunning(arg1) {
 
 export function IsScreenRecording(arg1) {
   return window['go']['main']['App']['IsScreenRecording'](arg1);
+}
+
+export function LaunchPackage(arg1, arg2) {
+  return window['go']['main']['App']['LaunchPackage'](arg1, arg2);
 }
 
 export function ListDevices() {

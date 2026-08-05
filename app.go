@@ -204,13 +204,29 @@ func (a *App) UninstallPackage(serial, pkg string, keepData, isSystem bool) (str
 	return a.client.Uninstall(serial, pkg, keepData, isSystem)
 }
 
-// ListPackages filter: "third" | "system" | "all"
+// ListPackages filter: "third" | "system" | "disabled" | "uninstalled" | "all"
 func (a *App) ListPackages(serial string, filter string) ([]adb.PackageInfo, error) {
 	return a.client.ListPackages(serial, filter)
 }
 
 func (a *App) ClearPackage(serial, pkg string) (string, error) {
 	return a.client.ClearPackage(serial, pkg)
+}
+
+func (a *App) LaunchPackage(serial, pkg string) (string, error) {
+	return a.client.LaunchPackage(serial, pkg)
+}
+
+func (a *App) ForceStopPackage(serial, pkg string) (string, error) {
+	return a.client.ForceStopPackage(serial, pkg)
+}
+
+func (a *App) DisablePackage(serial, pkg string) (string, error) {
+	return a.client.DisablePackage(serial, pkg)
+}
+
+func (a *App) EnablePackage(serial, pkg string) (string, error) {
+	return a.client.EnablePackage(serial, pkg)
 }
 
 // ---------- files (Device Explorer) ----------
