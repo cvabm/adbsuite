@@ -1,0 +1,14 @@
+# Wails / build output
+build/bin/
+
+# Frontend
+node_modules/
+frontend/dist/
+frontend/package.json.md5
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
