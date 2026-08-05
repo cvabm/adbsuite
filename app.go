@@ -233,6 +233,18 @@ func (a *App) IsPackageDebuggable(serial, pkg string) (bool, error) {
 	return a.client.IsPackageDebuggable(serial, pkg)
 }
 
+// ---------- running services ----------
+
+// ListRunningServices returns active ServiceRecords from dumpsys activity services.
+func (a *App) ListRunningServices(serial string) ([]adb.RunningService, error) {
+	return a.client.ListRunningServices(serial)
+}
+
+// StopService stops one service component (package/class) via am stopservice.
+func (a *App) StopService(serial, component string) (string, error) {
+	return a.client.StopService(serial, component)
+}
+
 // ---------- files (Device Explorer) ----------
 
 func (a *App) PushFile(serial, local, remote string) (string, error) {
