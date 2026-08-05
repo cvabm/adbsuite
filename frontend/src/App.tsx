@@ -10,6 +10,10 @@ import {
   UninstallPackage,
   ListPackages,
   ClearPackage,
+  LaunchPackage,
+  ForceStopPackage,
+  DisablePackage,
+  EnablePackage,
   Screenshot,
   StartScreenRecord,
   StopScreenRecord,
@@ -54,8 +58,17 @@ type Device = {
   usb: string;
 };
 
-type Pkg = { name: string; label?: string; path?: string; system?: boolean };
-type AppKindFilter = "third" | "system" | "all";
+type Pkg = {
+  name: string;
+  label?: string;
+  path?: string;
+  system?: boolean;
+  versionName?: string;
+  versionCode?: number;
+  disabled?: boolean;
+  uninstalled?: boolean;
+};
+type AppKindFilter = "third" | "system" | "disabled" | "uninstalled" | "all";
 type Settings = {
   adbPath: string;
   scrcpyPath: string;
@@ -271,11 +284,23 @@ export default function App() {
   const filteredPkgs = useMemo(() => {
     const q = pkgFilter.trim().toLowerCase();
     return packages.filter((p) => {
-      if (appKind === "third" && p.system) return false;
-      if (appKind === "system" && !p.system) return false;
+      const disabled = !!p.disabled;
+      const uninstalled = !!p.uninstalled;
+      if (appKind === "third" && (p.system || disabled || uninstalled)) return false;
+      if (appKind === "system" && (!p.system || disabled || uninstalled)) return false;
+      if (appKind === "disabled" && (!disabled || uninstalled)) return false;
+      if (appKind === "uninstalled" && !uninstalled) return false;
       if (!q) return true;
       const label = (p.label || "").toLowerCase();
-      return label.includes(q);
+      const name = (p.name || "").toLowerCase();
+      const vn = (p.versionName || "").toLowerCase();
+      const vc = p.versionCode != null && p.versionCode !== 0 ? String(p.versionCode) : "";
+      return (
+        label.includes(q) ||
+        name.includes(q) ||
+        vn.includes(q) ||
+        (vc !== "" && vc.includes(q))
+      );
     });
   }, [packages, pkgFilter, appKind]);
 
@@ -286,14 +311,31 @@ export default function App() {
 
   const appDisplayName = (p: Pkg) => (p.label && p.label.trim()) || p.name;
 
+  const appKindBadge = (p: Pkg): { text: string; cls: string } => {
+    if (p.uninstalled) return { text: "已卸载", cls: "uninstalled" };
+    if (p.disabled) return { text: "禁用", cls: "disabled" };
+    if (p.system) return { text: "系统", cls: "system" };
+    return { text: "普通", cls: "user" };
+  };
+
   const appCounts = useMemo(() => {
     let third = 0;
     let system = 0;
+    let disabled = 0;
+    let uninstalled = 0;
     for (const p of packages) {
+      if (p.uninstalled) {
+        uninstalled++;
+        continue;
+      }
+      if (p.disabled) {
+        disabled++;
+        continue;
+      }
       if (p.system) system++;
       else third++;
     }
-    return { third, system, all: packages.length };
+    return { third, system, disabled, uninstalled, all: packages.length };
   }, [packages]);
 
   const filteredLogs = useMemo(() => {
@@ -527,7 +569,7 @@ export default function App() {
             <section className="panel apps-panel">
               <h2>应用</h2>
               <p className="hint">
-                只显示应用名；普通应用与系统应用分开管理。点选后可卸载或清除数据。系统应用卸载为「当前用户卸载」。首次刷新会读取应用名并缓存。
+                列表显示应用名、包名、versionName、versionCode。支持普通 / 系统 / 被禁用 / 已卸载筛选；可启动、强制停止、卸载或清除数据。系统应用卸载为「当前用户卸载」。首次刷新会读取应用名并缓存。
               </p>
               <div className="row gap wrap">
                 <label className="chk">
@@ -600,6 +642,12 @@ export default function App() {
                     [
                       { id: "third" as const, label: "普通应用", count: appCounts.third },
                       { id: "system" as const, label: "系统应用", count: appCounts.system },
+                      { id: "disabled" as const, label: "被禁用", count: appCounts.disabled },
+                      {
+                        id: "uninstalled" as const,
+                        label: "已卸载",
+                        count: appCounts.uninstalled,
+                      },
                       { id: "all" as const, label: "全部", count: appCounts.all },
                     ] as const
                   ).map((opt) => (
@@ -617,7 +665,7 @@ export default function App() {
                   ))}
                 </div>
                 <input
-                  placeholder="搜索应用名"
+                  placeholder="搜索应用名 / 包名 / 版本"
                   value={pkgFilter}
                   onChange={(e) => setPkgFilter(e.target.value)}
                   style={{ flex: 1, minWidth: 160 }}
@@ -645,19 +693,114 @@ export default function App() {
                     <>
                       已选：
                       <strong className="text-strong">{appDisplayName(selectedPkg)}</strong>
-                      <span
-                        className={"app-badge " + (selectedPkg.system ? "system" : "user")}
-                      >
-                        {selectedPkg.system ? "系统" : "普通"}
-                      </span>
+                      <span className="apps-selected-pkg">{selectedPkg.name}</span>
+                      {(selectedPkg.versionName ||
+                        (selectedPkg.versionCode != null && selectedPkg.versionCode !== 0)) && (
+                        <span className="apps-selected-ver">
+                          {selectedPkg.versionName || "—"}
+                          {selectedPkg.versionCode != null && selectedPkg.versionCode !== 0
+                            ? ` (${selectedPkg.versionCode})`
+                            : ""}
+                        </span>
+                      )}
+                      {(() => {
+                        const b = appKindBadge(selectedPkg);
+                        return <span className={"app-badge " + b.cls}>{b.text}</span>;
+                      })()}
                     </>
                   ) : (
-                    "点击下方应用名进行选择"
+                    "点击下方列表进行选择"
                   )}
                 </div>
                 <button
+                  className="btn primary"
+                  disabled={
+                    busy || !selected || !pkgName || !!selectedPkg?.uninstalled
+                  }
+                  onClick={() =>
+                    run("启动", async () => {
+                      if (!needDevice() || !selectedPkg) return;
+                      await LaunchPackage(selected, selectedPkg.name);
+                    })
+                  }
+                >
+                  启动
+                </button>
+                <button
+                  className="btn"
+                  disabled={
+                    busy || !selected || !pkgName || !!selectedPkg?.uninstalled
+                  }
+                  onClick={() =>
+                    run("强制停止", async () => {
+                      if (!needDevice() || !selectedPkg) return;
+                      const name = appDisplayName(selectedPkg);
+                      if (!window.confirm(`确定强制停止「${name}」？`)) return;
+                      await ForceStopPackage(selected, selectedPkg.name);
+                    })
+                  }
+                >
+                  强制停止
+                </button>
+                <button
+                  className="btn"
+                  disabled={
+                    busy ||
+                    !selected ||
+                    !pkgName ||
+                    !!selectedPkg?.uninstalled ||
+                    !!selectedPkg?.disabled
+                  }
+                  onClick={() =>
+                    run("禁用", async () => {
+                      if (!needDevice() || !selectedPkg) return;
+                      const name = appDisplayName(selectedPkg);
+                      if (!window.confirm(`确定禁用「${name}」？`)) return;
+                      await DisablePackage(selected, selectedPkg.name);
+                      setPackages((prev) =>
+                        prev.map((p) =>
+                          p.name === selectedPkg.name
+                            ? { ...p, disabled: true }
+                            : p
+                        )
+                      );
+                    })
+                  }
+                >
+                  禁用
+                </button>
+                <button
+                  className="btn"
+                  disabled={
+                    busy ||
+                    !selected ||
+                    !pkgName ||
+                    !!selectedPkg?.uninstalled ||
+                    !selectedPkg?.disabled
+                  }
+                  onClick={() =>
+                    run("解除禁用", async () => {
+                      if (!needDevice() || !selectedPkg) return;
+                      const name = appDisplayName(selectedPkg);
+                      if (!window.confirm(`确定解除禁用「${name}」？`)) return;
+                      await EnablePackage(selected, selectedPkg.name);
+                      setPackages((prev) =>
+                        prev.map((p) =>
+                          p.name === selectedPkg.name
+                            ? { ...p, disabled: false }
+                            : p
+                        )
+                      );
+                    })
+                  }
+                >
+                  解除禁用
+                </button>
+                <button
                   className="btn danger"
-                  disabled={busy || !selected || !pkgName}
+                  disabled={
+                    busy || !selected || !pkgName || !!selectedPkg?.uninstalled
+                  }
                   onClick={() =>
                     run("卸载", async () => {
                       if (!needDevice() || !selectedPkg) return;
@@ -673,16 +816,33 @@ export default function App() {
                         false,
                         isSys
                       );
-                      setPackages((prev) => prev.filter((p) => p.name !== selectedPkg.name));
+                      // System user-uninstall becomes residual; third-party disappears.
+                      if (isSys) {
+                        setPackages((prev) =>
+                          prev.map((p) =>
+                            p.name === selectedPkg.name
+                              ? { ...p, uninstalled: true, disabled: false }
+                              : p
+                          )
+                        );
+                      } else {
+                        setPackages((prev) =>
+                          prev.filter((p) => p.name !== selectedPkg.name)
+                        );
+                      }
                       setPkgName("");
                     })
                   }
                 >
-                  {selectedPkg?.system ? "卸载（当前用户）" : "卸载"}
+                  {selectedPkg?.system && !selectedPkg?.uninstalled
+                    ? "卸载（当前用户）"
+                    : "卸载"}
                 </button>
                 <button
                   className="btn"
-                  disabled={busy || !selected || !pkgName}
+                  disabled={
+                    busy || !selected || !pkgName || !!selectedPkg?.uninstalled
+                  }
                   onClick={() =>
                     run("清除数据", async () => {
                       if (!needDevice() || !selectedPkg) return;
@@ -701,35 +861,52 @@ export default function App() {
                   <thead>
                     <tr>
                       <th>应用名</th>
+                      <th>包名</th>
+                      <th style={{ width: 110 }}>versionName</th>
+                      <th style={{ width: 100 }}>versionCode</th>
                       <th style={{ width: 72 }}>类型</th>
                     </tr>
                   </thead>
                   <tbody>
                     {filteredPkgs.length === 0 && (
                       <tr>
-                        <td colSpan={2} className="muted">
+                        <td colSpan={5} className="muted">
                           {packages.length === 0 ? "点「刷新列表」加载应用" : "无匹配应用"}
                         </td>
                       </tr>
                     )}
-                    {filteredPkgs.slice(0, 1200).map((p) => (
-                      <tr
-                        key={p.name}
-                        className={
-                          (pkgName === p.name ? "row-active " : "") +
-                          (p.system ? "app-row-system" : "app-row-user")
-                        }
-                        style={{ cursor: "pointer" }}
-                        onClick={() => setPkgName(p.name)}
-                      >
-                        <td>{appDisplayName(p)}</td>
-                        <td>
-                          <span className={"app-badge " + (p.system ? "system" : "user")}>
-                            {p.system ? "系统" : "普通"}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
+                    {filteredPkgs.slice(0, 1200).map((p) => {
+                      const badge = appKindBadge(p);
+                      return (
+                        <tr
+                          key={p.name}
+                          className={
+                            (pkgName === p.name ? "row-active " : "") +
+                            (p.uninstalled
+                              ? "app-row-uninstalled"
+                              : p.disabled
+                                ? "app-row-disabled"
+                                : p.system
+                                  ? "app-row-system"
+                                  : "app-row-user")
+                          }
+                          style={{ cursor: "pointer" }}
+                          onClick={() => setPkgName(p.name)}
+                        >
+                          <td>{appDisplayName(p)}</td>
+                          <td className="apps-pkg mono">{p.name}</td>
+                          <td className="apps-ver">{p.versionName || "—"}</td>
+                          <td className="apps-ver">
+                            {p.versionCode != null && p.versionCode !== 0
+                              ? p.versionCode
+                              : "—"}
+                          </td>
+                          <td>
+                            <span className={"app-badge " + badge.cls}>{badge.text}</span>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

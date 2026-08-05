@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,10 +27,14 @@ import (
 // PackageInfo is one installed app.
 // Name is the package id (for adb ops); Label is the human display name.
 type PackageInfo struct {
-	Name   string `json:"name"`
-	Label  string `json:"label"`
-	Path   string `json:"path,omitempty"`
-	System bool   `json:"system"` // true = system app, false = user/third-party
+	Name        string `json:"name"`
+	Label       string `json:"label"`
+	Path        string `json:"path,omitempty"`
+	System      bool   `json:"system"` // true = system app, false = user/third-party
+	VersionName string `json:"versionName,omitempty"`
+	VersionCode int64  `json:"versionCode,omitempty"`
+	Disabled    bool   `json:"disabled,omitempty"`    // pm disabled
+	Uninstalled bool   `json:"uninstalled,omitempty"` // residual after uninstall (--user / -u)
 }
 
 func (c *Client) Install(serial, apkPath string, reinstall, downgrade, grantAll bool) (string, error) {
@@ -81,8 +87,9 @@ func (c *Client) Uninstall(serial, pkg string, keepData, isSystem bool) (string,
 	return strings.TrimSpace(res.Combined), nil
 }
 
-// ListPackages lists installed apps.
-// filter: "third" (普通/第三方), "system" (系统), "all" (全部). Empty defaults to "third".
+// ListPackages lists apps with optional filter.
+// filter: "third" | "system" | "disabled" | "uninstalled" | "all". Empty defaults to "third".
+// Frontend usually requests "all" and filters client-side.
 func (c *Client) ListPackages(serial string, filter string) ([]PackageInfo, error) {
 	filter = strings.ToLower(strings.TrimSpace(filter))
 	switch filter {
@@ -90,52 +97,29 @@ func (c *Client) ListPackages(serial string, filter string) ([]PackageInfo, erro
 		filter = "third"
 	case "sys", "s":
 		filter = "system"
+	case "d", "disable", "disabled":
+		filter = "disabled"
+	case "u", "uninstall", "uninstalled", "removed":
+		filter = "uninstalled"
 	case "all", "*":
 		filter = "all"
 	}
 
-	var list []PackageInfo
-	var err error
-	switch filter {
-	case "third":
-		list, err = c.listPackagesFlag(serial, "-3", false)
-	case "system":
-		list, err = c.listPackagesFlag(serial, "-s", true)
-	default:
-		third, err1 := c.listPackagesFlag(serial, "-3", false)
-		sys, err2 := c.listPackagesFlag(serial, "-s", true)
-		if err1 != nil {
-			return nil, err1
-		}
-		if err2 != nil {
-			return nil, err2
-		}
-		byName := make(map[string]PackageInfo, len(third)+len(sys))
-		for _, p := range third {
-			byName[p.Name] = p
-		}
-		for _, p := range sys {
-			byName[p.Name] = p
-		}
-		list = make([]PackageInfo, 0, len(byName))
-		for _, p := range byName {
-			list = append(list, p)
-		}
-	}
+	list, err := c.listAllPackages(serial)
 	if err != nil {
 		return nil, err
-	}
-	if list == nil {
-		list = []PackageInfo{}
 	}
 
 	// Fill human labels (cached + concurrent resolve).
 	c.fillLabels(serial, list)
+	// Fill versionName / versionCode from dumpsys (one bulk call).
+	c.fillVersions(serial, list)
 
-	// 普通应用在前，系统应用在后；同组内按应用名排序
+	// Sort: active third → active system → disabled → uninstalled; name within group.
 	sort.Slice(list, func(i, j int) bool {
-		if list[i].System != list[j].System {
-			return !list[i].System && list[j].System
+		ki, kj := packageSortKey(list[i]), packageSortKey(list[j])
+		if ki != kj {
+			return ki < kj
 		}
 		li, lj := list[i].Label, list[j].Label
 		if li == lj {
@@ -143,15 +127,115 @@ func (c *Client) ListPackages(serial string, filter string) ([]PackageInfo, erro
 		}
 		return strings.ToLower(li) < strings.ToLower(lj)
 	})
+
+	if filter == "all" {
+		return list, nil
+	}
+	out := make([]PackageInfo, 0, len(list))
+	for _, p := range list {
+		switch filter {
+		case "third":
+			if !p.System && !p.Disabled && !p.Uninstalled {
+				out = append(out, p)
+			}
+		case "system":
+			if p.System && !p.Disabled && !p.Uninstalled {
+				out = append(out, p)
+			}
+		case "disabled":
+			if p.Disabled && !p.Uninstalled {
+				out = append(out, p)
+			}
+		case "uninstalled":
+			if p.Uninstalled {
+				out = append(out, p)
+			}
+		}
+	}
+	return out, nil
+}
+
+func packageSortKey(p PackageInfo) int {
+	if p.Uninstalled {
+		return 3
+	}
+	if p.Disabled {
+		return 2
+	}
+	if p.System {
+		return 1
+	}
+	return 0
+}
+
+// listAllPackages builds third + system + disabled flags + residual uninstalled packages.
+func (c *Client) listAllPackages(serial string) ([]PackageInfo, error) {
+	third, err1 := c.listPackagesFlag(serial, []string{"-3"}, false)
+	sys, err2 := c.listPackagesFlag(serial, []string{"-s"}, true)
+	if err1 != nil {
+		return nil, err1
+	}
+	if err2 != nil {
+		return nil, err2
+	}
+
+	byName := make(map[string]PackageInfo, len(third)+len(sys)+32)
+	for _, p := range third {
+		byName[p.Name] = p
+	}
+	for _, p := range sys {
+		byName[p.Name] = p
+	}
+
+	// Disabled packages (still installed).
+	if disabled, err := c.listPackageNames(serial, []string{"-d"}); err == nil {
+		for name := range disabled {
+			if p, ok := byName[name]; ok {
+				p.Disabled = true
+				byName[name] = p
+			} else {
+				// Rare: disabled but not in -3/-s snapshot; still surface it.
+				byName[name] = PackageInfo{
+					Name:     name,
+					Label:    friendlyFallback(name),
+					Disabled: true,
+					System:   false,
+				}
+			}
+		}
+	}
+
+	// Residual uninstalled: present in `pm list packages -u` but not currently installed.
+	installed := make(map[string]struct{}, len(byName))
+	for name := range byName {
+		installed[name] = struct{}{}
+	}
+	if withU, err := c.listPackagesFlag(serial, []string{"-u"}, false); err == nil {
+		for _, p := range withU {
+			if _, ok := installed[p.Name]; ok {
+				continue
+			}
+			p.Uninstalled = true
+			if p.System || isSystemAPKPath(p.Path) {
+				p.System = true
+			}
+			// Prefer path/system hint; default third-party residual.
+			byName[p.Name] = p
+		}
+	}
+
+	list := make([]PackageInfo, 0, len(byName))
+	for _, p := range byName {
+		list = append(list, p)
+	}
 	return list, nil
 }
 
-// listPackagesFlag runs `pm list packages -f [flag]` (-3 third-party, -s system).
-func (c *Client) listPackagesFlag(serial, flag string, system bool) ([]PackageInfo, error) {
+// listPackagesFlag runs `pm list packages -f [flags...]`.
+// system sets the System field when true; when false, System may still be inferred from path for -u.
+func (c *Client) listPackagesFlag(serial string, flags []string, system bool) ([]PackageInfo, error) {
 	args := []string{"shell", "pm", "list", "packages", "-f"}
-	if flag != "" {
-		args = append(args, flag)
-	}
+	args = append(args, flags...)
 	res, err := c.RunTimeout(serial, 60*time.Second, args...)
 	if err != nil {
 		return nil, err
@@ -167,19 +251,21 @@ func (c *Client) listPackagesFlag(serial, flag string, system bool) ([]PackageIn
 		// path may contain '=' (e.g. /data/app/~~xx==/pkg-yy==/base.apk); split on last '='
 		eq := strings.LastIndex(body, "=")
 		if eq <= 0 || eq == len(body)-1 {
+			name := body
 			list = append(list, PackageInfo{
-				Name:   body,
-				Label:  friendlyFallback(body),
-				System: system,
+				Name:   name,
+				Label:  friendlyFallback(name),
+				System: system || isSystemAPKPath(""),
 			})
 			continue
 		}
 		path, name := body[:eq], body[eq+1:]
+		sys := system || isSystemAPKPath(path)
 		list = append(list, PackageInfo{
 			Name:   name,
 			Path:   path,
 			Label:  friendlyFallback(name),
-			System: system,
+			System: sys,
 		})
 	}
 	if list == nil {
@@ -188,12 +274,192 @@ func (c *Client) listPackagesFlag(serial, flag string, system bool) ([]PackageIn
 	return list, nil
 }
 
+// listPackageNames returns package names from `pm list packages [flags...]` (no -f).
+func (c *Client) listPackageNames(serial string, flags []string) (map[string]struct{}, error) {
+	args := []string{"shell", "pm", "list", "packages"}
+	args = append(args, flags...)
+	res, err := c.RunTimeout(serial, 60*time.Second, args...)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]struct{})
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "package:") {
+			continue
+		}
+		name := strings.TrimSpace(strings.TrimPrefix(line, "package:"))
+		// tolerate "package:name versionCode:x"
+		if i := strings.IndexAny(name, " \t"); i > 0 {
+			name = name[:i]
+		}
+		if name != "" {
+			out[name] = struct{}{}
+		}
+	}
+	return out, nil
+}
+
+func isSystemAPKPath(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	// Common system partitions / locations.
+	prefixes := []string{
+		"/system/", "/system_ext/", "/product/", "/vendor/",
+		"/oem/", "/odm/", "/apex/", "/priv-app/",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(path, p) {
+			return true
+		}
+	}
+	// e.g. /system/app/Foo/Foo.apk without trailing slash check above for "/system" alone
+	if path == "/system" || strings.HasPrefix(path, "/system/") {
+		return true
+	}
+	return false
+}
+
 func (c *Client) ClearPackage(serial, pkg string) (string, error) {
 	res, err := c.Shell(serial, "pm clear "+shellQuote(pkg))
 	if err != nil {
 		return res.Combined, err
 	}
 	return strings.TrimSpace(res.Stdout), nil
+}
+
+// LaunchPackage starts the app's launcher activity (monkey LAUNCHER intent).
+func (c *Client) LaunchPackage(serial, pkg string) (string, error) {
+	pkg = strings.TrimSpace(pkg)
+	if pkg == "" {
+		return "", fmt.Errorf("包名为空")
+	}
+	// Prefer monkey: works without resolving activity component manually.
+	cmd := "monkey -p " + shellQuote(pkg) + " -c android.intent.category.LAUNCHER 1"
+	res, err := c.Shell(serial, cmd)
+	out := strings.TrimSpace(firstNonEmpty(res.Stdout, res.Combined))
+	if err != nil {
+		// Fallback: resolve main activity then am start.
+		if out2, err2 := c.launchViaResolve(serial, pkg); err2 == nil {
+			return out2, nil
+		}
+		return out, err
+	}
+	// monkey prints events injected; treat "No activities found" as failure.
+	low := strings.ToLower(out)
+	if strings.Contains(low, "no activities") ||
+		(strings.Contains(low, "error") && strings.Contains(low, "monkey")) {
+		if out2, err2 := c.launchViaResolve(serial, pkg); err2 == nil {
+			return out2, nil
+		}
+		return out, fmt.Errorf("%s", firstNonEmpty(out, "无法启动应用"))
+	}
+	return out, nil
+}
+
+func (c *Client) launchViaResolve(serial, pkg string) (string, error) {
+	// cmd package resolve-activity --brief -c android.intent.category.LAUNCHER <pkg>
+	res, err := c.Shell(serial, "cmd package resolve-activity --brief -c android.intent.category.LAUNCHER "+shellQuote(pkg))
+	if err != nil && strings.TrimSpace(res.Stdout) == "" {
+		return "", err
+	}
+	comp := ""
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "priority=") || strings.HasPrefix(line, "No activity") {
+			continue
+		}
+		// last non-meta line is usually package/activity
+		if strings.Contains(line, "/") {
+			comp = line
+		}
+	}
+	if comp == "" {
+		return "", fmt.Errorf("未找到可启动的 Activity")
+	}
+	res2, err2 := c.Shell(serial, "am start -n "+shellQuote(comp))
+	out := strings.TrimSpace(firstNonEmpty(res2.Stdout, res2.Combined))
+	if err2 != nil {
+		return out, err2
+	}
+	return out, nil
+}
+
+// ForceStopPackage force-stops a running app.
+func (c *Client) ForceStopPackage(serial, pkg string) (string, error) {
+	pkg = strings.TrimSpace(pkg)
+	if pkg == "" {
+		return "", fmt.Errorf("包名为空")
+	}
+	res, err := c.Shell(serial, "am force-stop "+shellQuote(pkg))
+	if err != nil {
+		return res.Combined, err
+	}
+	return strings.TrimSpace(firstNonEmpty(res.Stdout, res.Combined, "OK")), nil
+}
+
+// DisablePackage disables an app for the current user (no root required on most devices).
+// Uses `pm disable-user --user 0`; falls back to `pm disable` if needed.
+func (c *Client) DisablePackage(serial, pkg string) (string, error) {
+	pkg = strings.TrimSpace(pkg)
+	if pkg == "" {
+		return "", fmt.Errorf("包名为空")
+	}
+	q := shellQuote(pkg)
+	res, err := c.Shell(serial, "pm disable-user --user 0 "+q)
+	out := strings.TrimSpace(firstNonEmpty(res.Stdout, res.Combined))
+	if err == nil && !isPmStateFailure(out, "disabled") {
+		return out, nil
+	}
+	// Fallback (may need root on some devices).
+	res2, err2 := c.Shell(serial, "pm disable "+q)
+	out2 := strings.TrimSpace(firstNonEmpty(res2.Stdout, res2.Combined))
+	if err2 != nil || isPmStateFailure(out2, "disabled") {
+		return firstNonEmpty(out2, out), fmt.Errorf("%s", firstNonEmpty(out2, out, "禁用失败"))
+	}
+	return out2, nil
+}
+
+// EnablePackage re-enables a disabled app for the current user.
+// Uses `pm enable`; falls back to `pm enable --user 0` if needed.
+func (c *Client) EnablePackage(serial, pkg string) (string, error) {
+	pkg = strings.TrimSpace(pkg)
+	if pkg == "" {
+		return "", fmt.Errorf("包名为空")
+	}
+	q := shellQuote(pkg)
+	res, err := c.Shell(serial, "pm enable "+q)
+	out := strings.TrimSpace(firstNonEmpty(res.Stdout, res.Combined))
+	if err == nil && !isPmStateFailure(out, "enabled") {
+		return out, nil
+	}
+	res2, err2 := c.Shell(serial, "pm enable --user 0 "+q)
+	out2 := strings.TrimSpace(firstNonEmpty(res2.Stdout, res2.Combined))
+	if err2 != nil || isPmStateFailure(out2, "enabled") {
+		return firstNonEmpty(out2, out), fmt.Errorf("%s", firstNonEmpty(out2, out, "解除禁用失败"))
+	}
+	return out2, nil
+}
+
+// isPmStateFailure reports whether pm enable/disable output looks like a failure.
+// want is "disabled" or "enabled" (substring of "new state: ...").
+func isPmStateFailure(out, want string) bool {
+	low := strings.ToLower(out)
+	if low == "" {
+		return false
+	}
+	// Success typically: "Package xxx new state: disabled-user" / "enabled"
+	if strings.Contains(low, "new state:") && strings.Contains(low, strings.ToLower(want)) {
+		return false
+	}
+	return strings.Contains(low, "error") ||
+		strings.Contains(low, "security exception") ||
+		strings.Contains(low, "not allowed") ||
+		strings.Contains(low, "failed") ||
+		strings.Contains(low, "does not exist") ||
+		strings.Contains(low, "unknown package")
 }
 
 func (c *Client) PackagePath(serial, pkg string) (string, error) {
@@ -220,6 +486,136 @@ func (c *Client) PidOf(serial, pkg string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(res.Stdout), nil
+}
+
+// ---------- version resolution ----------
+
+type pkgVersion struct {
+	Name string
+	Code int64
+}
+
+var (
+	rePkgHeader   = regexp.MustCompile(`^\s*Package\s+\[([^\]]+)\]`)
+	reVersionCode = regexp.MustCompile(`^\s*versionCode=(\d+)`)
+	reVersionName = regexp.MustCompile(`^\s*versionName=(.*)$`)
+)
+
+// fillVersions populates VersionName / VersionCode via dumpsys package (bulk).
+// Falls back to `pm list packages --show-versioncode` (code only) if dumpsys fails.
+func (c *Client) fillVersions(serial string, list []PackageInfo) {
+	if len(list) == 0 {
+		return
+	}
+	vers := c.fetchVersionsDumpsys(serial)
+	if len(vers) == 0 {
+		vers = c.fetchVersionCodesOnly(serial)
+	}
+	if len(vers) == 0 {
+		return
+	}
+	for i := range list {
+		if v, ok := vers[list[i].Name]; ok {
+			if v.Name != "" {
+				list[i].VersionName = v.Name
+			}
+			if v.Code != 0 {
+				list[i].VersionCode = v.Code
+			}
+		}
+	}
+}
+
+func (c *Client) fetchVersionsDumpsys(serial string) map[string]pkgVersion {
+	// Device-side filter keeps adb payload small; full dumpsys is multi-MB.
+	// toybox/busybox grep both accept -E on modern Android.
+	const filtered = `dumpsys package 2>/dev/null | grep -E '^[[:space:]]*Package \[|^[[:space:]]*versionCode=|^[[:space:]]*versionName='`
+	res, err := c.RunTimeout(serial, 2*time.Minute, "shell", filtered)
+	out := ""
+	if err == nil {
+		out = res.Stdout
+	}
+	if strings.TrimSpace(out) == "" || !strings.Contains(out, "Package [") {
+		// Fallback: full dumpsys (slower / larger).
+		res2, err2 := c.RunTimeout(serial, 2*time.Minute, "shell", "dumpsys", "package")
+		if err2 != nil || strings.TrimSpace(res2.Stdout) == "" {
+			return nil
+		}
+		out = res2.Stdout
+	}
+	return parseDumpsysPackageVersions(out)
+}
+
+func (c *Client) fetchVersionCodesOnly(serial string) map[string]pkgVersion {
+	res, err := c.RunTimeout(serial, 60*time.Second, "shell", "pm", "list", "packages", "--show-versioncode")
+	if err != nil || strings.TrimSpace(res.Stdout) == "" {
+		return nil
+	}
+	out := make(map[string]pkgVersion)
+	// package:com.example versionCode:123
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "package:") {
+			continue
+		}
+		body := strings.TrimPrefix(line, "package:")
+		name := body
+		var code int64
+		if i := strings.Index(body, " "); i > 0 {
+			name = body[:i]
+			rest := strings.TrimSpace(body[i+1:])
+			if strings.HasPrefix(rest, "versionCode:") {
+				code, _ = strconv.ParseInt(strings.TrimPrefix(rest, "versionCode:"), 10, 64)
+			}
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		out[name] = pkgVersion{Code: code}
+	}
+	return out
+}
+
+func parseDumpsysPackageVersions(dumpsys string) map[string]pkgVersion {
+	out := make(map[string]pkgVersion)
+	var cur string
+	var ver pkgVersion
+	flush := func() {
+		if cur == "" {
+			return
+		}
+		// Keep first block per package name (primary user package entry).
+		if _, exists := out[cur]; !exists {
+			out[cur] = ver
+		}
+		cur = ""
+		ver = pkgVersion{}
+	}
+	for _, line := range strings.Split(dumpsys, "\n") {
+		if m := rePkgHeader.FindStringSubmatch(line); m != nil {
+			flush()
+			cur = m[1]
+			continue
+		}
+		if cur == "" {
+			continue
+		}
+		if m := reVersionCode.FindStringSubmatch(line); m != nil {
+			if ver.Code == 0 {
+				ver.Code, _ = strconv.ParseInt(m[1], 10, 64)
+			}
+			continue
+		}
+		if m := reVersionName.FindStringSubmatch(line); m != nil {
+			if ver.Name == "" {
+				ver.Name = strings.TrimSpace(m[1])
+			}
+			continue
+		}
+	}
+	flush()
+	return out
 }
 
 // ---------- label resolution ----------

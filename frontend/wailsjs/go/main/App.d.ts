@@ -28,7 +28,13 @@ export function DeleteRemote(arg1:string,arg2:string,arg3:boolean):Promise<void>
 
 export function DeviceInfo(arg1:string):Promise<adb.DeviceInfo>;
 
+export function DisablePackage(arg1:string,arg2:string):Promise<string>;
+
 export function Disconnect(arg1:string):Promise<string>;
+
+export function EnablePackage(arg1:string,arg2:string):Promise<string>;
+
+export function ForceStopPackage(arg1:string,arg2:string):Promise<string>;
 
 export function ForegroundActivity(arg1:string):Promise<string>;
 
@@ -45,6 +51,8 @@ export function IsLogcatRunning():Promise<boolean>;
 export function IsScrcpyRunning(arg1:string):Promise<boolean>;
 
 export function IsScreenRecording(arg1:string):Promise<boolean>;
+
+export function LaunchPackage(arg1:string,arg2:string):Promise<string>;
 
 export function ListDevices():Promise<Array<adb.Device>>;
 

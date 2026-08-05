@@ -432,6 +432,20 @@ tr.row-active td {
   font-weight: 650;
 }
 
+.apps-selected-pkg {
+  margin-left: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  opacity: 0.85;
+  word-break: break-all;
+}
+
+.apps-selected-ver {
+  margin-left: 8px;
+  font-size: 0.82rem;
+  opacity: 0.8;
+}
+
 .apps-list.table-wrap {
   flex: 1;
   min-height: 0;
@@ -446,6 +460,23 @@ tr.row-active td {
 .apps-list td {
   font-size: 0.95rem;
   padding: 10px 12px;
+}
+
+.apps-list td.apps-pkg {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.apps-list td.apps-ver {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.84rem;
+  white-space: nowrap;
+}
+
+.apps-list .mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 .seg {
@@ -508,6 +539,26 @@ tr.row-active td {
 .app-badge.system {
   background: rgba(230, 184, 77, 0.18);
   color: var(--warn);
+}
+
+.app-badge.disabled {
+  background: rgba(160, 160, 170, 0.2);
+  color: #9aa0a6;
+}
+
+.app-badge.uninstalled {
+  background: rgba(220, 80, 80, 0.16);
+  color: var(--danger, #e05555);
+}
+
+.theme-light .app-badge.disabled {
+  background: rgba(100, 100, 110, 0.12);
+  color: #6b7280;
+}
+
+.theme-light .app-badge.uninstalled {
+  background: rgba(200, 50, 50, 0.1);
+  color: #c0392b;
 }
 
 .apps-selected .app-badge {
