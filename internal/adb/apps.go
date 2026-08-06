@@ -400,47 +400,266 @@ func (c *Client) ForceStopPackage(serial, pkg string) (string, error) {
 	return strings.TrimSpace(firstNonEmpty(res.Stdout, res.Combined, "OK")), nil
 }
 
-// DisablePackage disables an app for the current user (no root required on most devices).
-// Uses `pm disable-user --user 0`; falls back to `pm disable` if needed.
+// currentUserID returns the foreground Android user id (digits), default "0".
+func (c *Client) currentUserID(serial string) string {
+	res, err := c.Shell(serial, "am get-current-user")
+	if err != nil {
+		return "0"
+	}
+	u := strings.TrimSpace(firstNonEmpty(res.Stdout, res.Combined))
+	if u == "" {
+		return "0"
+	}
+	for _, r := range u {
+		if r < '0' || r > '9' {
+			return "0"
+		}
+	}
+	return u
+}
+
+// DisablePackage disables an app for the current user (no root on most devices).
+// Tries disable-user / cmd package / pm disable with the active user id.
+// Many Xiaomi/HyperOS preloads reject shell disable (SecurityException); callers may
+// fall back to pm uninstall --user <id> (current-user uninstall).
 func (c *Client) DisablePackage(serial, pkg string) (string, error) {
 	pkg = strings.TrimSpace(pkg)
 	if pkg == "" {
 		return "", fmt.Errorf("包名为空")
 	}
 	q := shellQuote(pkg)
-	res, err := c.Shell(serial, "pm disable-user --user 0 "+q)
-	out := strings.TrimSpace(firstNonEmpty(res.Stdout, res.Combined))
-	if err == nil && !isPmStateFailure(out, "disabled") {
-		return out, nil
+	user := c.currentUserID(serial)
+	cmds := []string{
+		"pm disable-user --user " + user + " " + q,
+		"pm disable-user " + q,
+		"cmd package disable-user --user " + user + " " + q,
+		"pm disable --user " + user + " " + q,
+		"pm disable " + q,
 	}
-	// Fallback (may need root on some devices).
-	res2, err2 := c.Shell(serial, "pm disable "+q)
-	out2 := strings.TrimSpace(firstNonEmpty(res2.Stdout, res2.Combined))
-	if err2 != nil || isPmStateFailure(out2, "disabled") {
-		return firstNonEmpty(out2, out), fmt.Errorf("%s", firstNonEmpty(out2, out, "禁用失败"))
+	var last string
+	for _, cmd := range cmds {
+		res, err := c.Shell(serial, cmd)
+		out := strings.TrimSpace(firstNonEmpty(res.Stdout, res.Stderr, res.Combined))
+		if out != "" {
+			last = out
+		} else if err != nil {
+			last = err.Error()
+		}
+		if err == nil && !isPmStateFailure(out, "disabled") {
+			return out, nil
+		}
 	}
-	return out2, nil
+	if isProtectedDisableError(last) {
+		return last, fmt.Errorf(
+			"系统拒绝 shell 禁用该应用（常见于小米/HyperOS 预装保护包，如超级小爱）。\n"+
+				"可改用「卸载（当前用户）」：pm uninstall --user %s，多数机型无需 root，应用会出现在「已卸载」列表。\n\n%s",
+			user, last)
+	}
+	return last, fmt.Errorf("%s", firstNonEmpty(last, "禁用失败"))
 }
 
-// EnablePackage re-enables a disabled app for the current user.
-// Uses `pm enable`; falls back to `pm enable --user 0` if needed.
+// restoreCompanionPkgs returns related system packages that often must be restored together.
+// Only packages that exist on the device (pm path / residual) are actually restored.
+func restoreCompanionPkgs(pkg string) []string {
+	pkg = strings.TrimSpace(pkg)
+	switch pkg {
+	case "com.miui.voiceassist":
+		// 超级小爱：主程序 + 语音唤醒 + 澎湃 AI 等常见依赖
+		return []string{
+			"com.miui.voiceassist",
+			"com.miui.voicetrigger",
+			"com.xiaomi.aicr",
+			"com.miui.personalassistant",
+			"com.xiaomi.aiasst.service",
+			"com.xiaomi.aiasst.vision",
+		}
+	default:
+		return []string{pkg}
+	}
+}
+
+// restoreOnePackage runs install-existing + enable + force-stop for a single package.
+// ok means the package is usable for the current user (installed/enabled), not that every subcommand succeeded.
+func (c *Client) restoreOnePackage(serial, pkg, user string) (ok bool, detail string) {
+	pkg = strings.TrimSpace(pkg)
+	if pkg == "" {
+		return false, "包名为空"
+	}
+	q := shellQuote(pkg)
+	var parts []string
+
+	// Does the APK exist on the device at all (including residual after user-uninstall)?
+	pathRes, _ := c.Shell(serial, "pm path "+q+" 2>/dev/null; pm path --user "+user+" "+q+" 2>/dev/null")
+	pathOut := strings.TrimSpace(firstNonEmpty(pathRes.Stdout, pathRes.Combined))
+	// Also check residual list
+	listRes, _ := c.Shell(serial, "pm list packages -u "+q)
+	listOut := strings.TrimSpace(firstNonEmpty(listRes.Stdout, listRes.Combined))
+	exists := strings.Contains(pathOut, "package:") || strings.Contains(listOut, "package:"+pkg)
+	if !exists {
+		// Try install-existing anyway (some builds only answer after this).
+		resIE, errIE := c.Shell(serial, "cmd package install-existing --user "+user+" "+q)
+		outIE := strings.TrimSpace(firstNonEmpty(resIE.Stdout, resIE.Stderr, resIE.Combined))
+		if errIE != nil || isPmStateFailure(outIE, "enabled") {
+			if outIE == "" && errIE != nil {
+				outIE = errIE.Error()
+			}
+			return false, "设备上无此系统包，无法恢复: " + firstNonEmpty(outIE, "not found")
+		}
+		parts = append(parts, firstNonEmpty(outIE, "install-existing OK"))
+	} else {
+		resIE, errIE := c.Shell(serial, "cmd package install-existing --user "+user+" "+q)
+		outIE := strings.TrimSpace(firstNonEmpty(resIE.Stdout, resIE.Stderr, resIE.Combined))
+		if errIE == nil && !isPmStateFailure(outIE, "enabled") {
+			parts = append(parts, firstNonEmpty(outIE, "install-existing OK"))
+		} else if outIE != "" {
+			parts = append(parts, "install-existing: "+outIE)
+		}
+	}
+
+	enabled := false
+	for _, cmd := range []string{
+		"pm enable " + q,
+		"pm enable --user " + user + " " + q,
+		"cmd package enable --user " + user + " " + q,
+	} {
+		res, err := c.Shell(serial, cmd)
+		out := strings.TrimSpace(firstNonEmpty(res.Stdout, res.Stderr, res.Combined))
+		if err == nil && !isPmStateFailure(out, "enabled") {
+			parts = append(parts, firstNonEmpty(out, "enable OK"))
+			enabled = true
+			break
+		}
+	}
+	if !enabled {
+		// install-existing success is enough for residual packages on many devices.
+		parts = append(parts, "enable 跳过/受限（若已 install-existing 可忽略）")
+	}
+
+	_, _ = c.Shell(serial, "am force-stop "+q)
+
+	// Final presence check for current user.
+	check, _ := c.Shell(serial, "pm path "+q)
+	checkOut := strings.TrimSpace(firstNonEmpty(check.Stdout, check.Combined))
+	ok = strings.Contains(checkOut, "package:") || enabled
+	if ok {
+		parts = append(parts, "状态: 当前用户可见")
+	} else {
+		parts = append(parts, "状态: 仍不可见")
+	}
+	return ok, strings.Join(parts, "; ")
+}
+
+// EnablePackage re-enables a disabled app, or restores a user-uninstalled system app.
+// For known multi-package suites (e.g. 超级小爱), also restores companion packages.
 func (c *Client) EnablePackage(serial, pkg string) (string, error) {
 	pkg = strings.TrimSpace(pkg)
 	if pkg == "" {
 		return "", fmt.Errorf("包名为空")
 	}
+	user := c.currentUserID(serial)
+	targets := restoreCompanionPkgs(pkg)
+	var lines []string
+	mainOK := false
+
+	for _, p := range targets {
+		ok, detail := c.restoreOnePackage(serial, p, user)
+		tag := "失败"
+		if ok {
+			tag = "OK"
+			if p == pkg {
+				mainOK = true
+			}
+		} else if p != pkg {
+			// Companion missing on this ROM is normal — report as skip, not hard fail.
+			if strings.Contains(detail, "无此系统包") {
+				tag = "跳过"
+			}
+		}
+		if p == pkg && ok {
+			mainOK = true
+		}
+		lines = append(lines, fmt.Sprintf("[%s] %s — %s", tag, p, detail))
+	}
+
+	// Try launch main package once (best-effort).
+	if mainOK {
+		if out, err := c.LaunchPackage(serial, pkg); err == nil {
+			lines = append(lines, "已尝试启动: "+out)
+		} else if out != "" {
+			lines = append(lines, "启动尝试: "+out)
+		}
+	}
+
+	lines = append(lines, "",
+		"若超级小爱仍无法语音唤醒/打开：",
+		"1. 设置 → 应用设置 → 管理应用 → 超级小爱 → 权限全部允许，并「清除缓存」后再开",
+		"2. 设置 → 更多设置 / 应用设置 → 默认应用 → 数字助理/语音助手 → 选超级小爱",
+		"3. 确认关联包 com.miui.voicetrigger（语音唤醒）上方为 OK；若失败请手动恢复该包",
+		"4. 仍不行：设置 → 应用设置 → 超级小爱 → 卸载更新（若有）后重启，或系统更新/应用商店修复",
+	)
+
+	if !mainOK {
+		return strings.Join(lines, "\n"), fmt.Errorf("主包 %s 未能恢复\n%s", pkg, strings.Join(lines, "\n"))
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// DiagnosePackage returns a short text report of package install/enable state (for support).
+func (c *Client) DiagnosePackage(serial, pkg string) (string, error) {
+	pkg = strings.TrimSpace(pkg)
+	if pkg == "" {
+		return "", fmt.Errorf("包名为空")
+	}
+	user := c.currentUserID(serial)
 	q := shellQuote(pkg)
-	res, err := c.Shell(serial, "pm enable "+q)
-	out := strings.TrimSpace(firstNonEmpty(res.Stdout, res.Combined))
-	if err == nil && !isPmStateFailure(out, "enabled") {
-		return out, nil
+	var b strings.Builder
+	fmt.Fprintf(&b, "包名: %s\n用户: %s\n", pkg, user)
+
+	run := func(title, cmd string) {
+		res, err := c.Shell(serial, cmd)
+		out := strings.TrimSpace(firstNonEmpty(res.Stdout, res.Stderr, res.Combined))
+		if out == "" && err != nil {
+			out = err.Error()
+		}
+		if out == "" {
+			out = "(空)"
+		}
+		// keep report short
+		if len(out) > 800 {
+			out = out[:800] + "…"
+		}
+		fmt.Fprintf(&b, "\n## %s\n%s\n", title, out)
 	}
-	res2, err2 := c.Shell(serial, "pm enable --user 0 "+q)
-	out2 := strings.TrimSpace(firstNonEmpty(res2.Stdout, res2.Combined))
-	if err2 != nil || isPmStateFailure(out2, "enabled") {
-		return firstNonEmpty(out2, out), fmt.Errorf("%s", firstNonEmpty(out2, out, "解除禁用失败"))
+
+	run("pm path", "pm path "+q)
+	run("pm list packages -u (含已卸载残留)", "pm list packages -u "+q)
+	run("pm list packages -d (若在禁用列表)", "pm list packages -d "+q)
+	run("dumpsys 启用状态", "dumpsys package "+q+" | grep -E 'User |enabled=|installed=|hidden=|stopped=|ceDataInode' | head -n 40")
+	run("可启动 Activity", "cmd package resolve-activity --brief -c android.intent.category.LAUNCHER "+q)
+
+	// companions snapshot
+	if comps := restoreCompanionPkgs(pkg); len(comps) > 1 {
+		fmt.Fprintf(&b, "\n## 关联包是否存在\n")
+		for _, p := range comps {
+			res, _ := c.Shell(serial, "pm path "+shellQuote(p)+" 2>/dev/null; pm list packages -u "+shellQuote(p))
+			out := strings.TrimSpace(firstNonEmpty(res.Stdout, res.Combined))
+			if strings.Contains(out, "package:") {
+				fmt.Fprintf(&b, "OK  %s\n", p)
+			} else {
+				fmt.Fprintf(&b, "缺  %s\n", p)
+			}
+		}
 	}
-	return out2, nil
+	return b.String(), nil
+}
+
+// isProtectedDisableError detects vendor-blocked shell disable (esp. MIUI/HyperOS).
+func isProtectedDisableError(out string) bool {
+	low := strings.ToLower(out)
+	return strings.Contains(low, "securityexception") ||
+		strings.Contains(low, "security exception") ||
+		strings.Contains(low, "cannot change component state") ||
+		strings.Contains(low, "shell cannot change")
 }
 
 // isPmStateFailure reports whether pm enable/disable output looks like a failure.
@@ -454,8 +673,15 @@ func isPmStateFailure(out, want string) bool {
 	if strings.Contains(low, "new state:") && strings.Contains(low, strings.ToLower(want)) {
 		return false
 	}
+	// install-existing success: "Package com.xxx installed for user: 0"
+	if strings.Contains(low, "installed for user") {
+		return false
+	}
 	return strings.Contains(low, "error") ||
+		strings.Contains(low, "exception") ||
+		strings.Contains(low, "securityexception") ||
 		strings.Contains(low, "security exception") ||
+		strings.Contains(low, "cannot change component state") ||
 		strings.Contains(low, "not allowed") ||
 		strings.Contains(low, "failed") ||
 		strings.Contains(low, "does not exist") ||
