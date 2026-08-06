@@ -6,11 +6,13 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"adbsuite/internal/paths"
 )
 
 func (c *Client) Screenshot(serial, localPath string) (string, error) {
 	if localPath == "" {
-		localPath = filepath.Join(os.TempDir(), fmt.Sprintf("adbsuite_%d.png", time.Now().Unix()))
+		localPath = paths.DesktopFile(fmt.Sprintf("adbsuite_%d.png", time.Now().Unix()))
 	}
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil && !os.IsExist(err) {
 		// if only filename, Dir may be "."

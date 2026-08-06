@@ -108,7 +108,7 @@ export function StartLogcat(arg1:string,arg2:boolean):Promise<void>;
 
 export function StartScrcpy(arg1:string):Promise<void>;
 
-export function StartScreenRecord(arg1:string,arg2:string):Promise<void>;
+export function StartScreenRecord(arg1:string,arg2:string):Promise<string>;
 
 export function StopLogcat():Promise<void>;
 

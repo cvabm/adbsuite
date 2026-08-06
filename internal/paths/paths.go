@@ -39,6 +39,31 @@ func ScrcpyPath(custom string) string {
 	return Resolve(custom, filepath.Join("bin", "scrcpy", name), name)
 }
 
+// DesktopDir returns the user's Desktop folder. Falls back to home, then temp.
+func DesktopDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return os.TempDir()
+	}
+	for _, name := range []string{"Desktop", "桌面"} {
+		p := filepath.Join(home, name)
+		if st, err := os.Stat(p); err == nil && st.IsDir() {
+			return p
+		}
+	}
+	// Prefer creating under standard Desktop name if missing
+	desk := filepath.Join(home, "Desktop")
+	if err := os.MkdirAll(desk, 0o755); err == nil {
+		return desk
+	}
+	return home
+}
+
+// DesktopFile joins filename under the Desktop directory.
+func DesktopFile(filename string) string {
+	return filepath.Join(DesktopDir(), filename)
+}
+
 func candidateBases() []string {
 	seen := map[string]bool{}
 	var out []string
