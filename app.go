@@ -43,6 +43,7 @@ func (a *App) startup(ctx context.Context) {
 	a.client = &adb.Client{AdbPath: a.adbPath}
 	a.scrcpy = scrcpy.New(a.scrcpyPath)
 	a.logcat = logcat.New()
+	// Android Studio–style: adb shell screenrecord + Ctrl+C finalize (no scrcpy window).
 	a.recorder = adb.NewRecorder(a.adbPath)
 	cfg := a.store.Get()
 	a.queue = tasks.New(cfg.MaxConcurrency)
@@ -285,10 +286,12 @@ func (a *App) RenameRemote(serial, oldPath, newPath string) error {
 // ---------- screen / ports ----------
 
 func (a *App) Screenshot(serial, localPath string) (string, error) {
+	// empty localPath → Desktop (see adb.Screenshot)
 	return a.client.Screenshot(serial, localPath)
 }
 
-func (a *App) StartScreenRecord(serial, localPath string) error {
+func (a *App) StartScreenRecord(serial, localPath string) (string, error) {
+	// empty localPath → Desktop; returns the path used for the recording file
 	return a.recorder.Start(serial, localPath)
 }
 
@@ -404,7 +407,7 @@ func (a *App) BatchInstall(serials []string, apk string, reinstall, downgrade, g
 
 func (a *App) BatchScreenshot(serials []string, dir string) []string {
 	if dir == "" {
-		dir = "."
+		dir = paths.DesktopDir()
 	}
 	return a.queue.EnqueueMany("screenshot", "截图", serials, func(serial string) (string, error) {
 		safe := strings.ReplaceAll(serial, ":", "_")

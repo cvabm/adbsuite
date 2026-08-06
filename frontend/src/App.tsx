@@ -37,8 +37,6 @@ import {
   BatchStartScrcpy,
   BatchStopScrcpy,
   SelectFile,
-  SelectSaveFile,
-  SelectDirectory,
   TestAdb,
 } from "../wailsjs/go/main/App";
 import DeviceExplorer from "./components/DeviceExplorer";
@@ -1452,9 +1450,10 @@ export default function App() {
                   disabled={busy || !selected}
                   onClick={() =>
                     run("截图", async () => {
-                      const f = await SelectSaveFile("保存截图", "screenshot.png");
-                      if (!f) return;
-                      await Screenshot(selected, f);
+                      // 不弹路径选择，直接保存到桌面
+                      const p = await Screenshot(selected, "");
+                      if (p) window.alert(`截图已保存到桌面：\n${p}`);
+                      return p;
                     })
                   }
                 >
@@ -1465,9 +1464,10 @@ export default function App() {
                   disabled={busy || checkedSerials.length === 0}
                   onClick={() =>
                     run("批量截图", async () => {
-                      const dir = await SelectDirectory("截图保存目录");
-                      if (!dir) return;
-                      await BatchScreenshot(checkedSerials, dir);
+                      // 不选目录，全部保存到桌面
+                      const results = await BatchScreenshot(checkedSerials, "");
+                      window.alert(`批量截图完成，已保存到桌面（${checkedSerials.length} 台）`);
+                      return results;
                     })
                   }
                 >
@@ -1478,11 +1478,11 @@ export default function App() {
                   disabled={busy || !selected || recording}
                   onClick={() =>
                     run("开始录屏", async () => {
-                      const f = await SelectSaveFile("录屏保存为", "record.mp4");
-                      if (!f) return;
-                      await StartScreenRecord(selected, f);
-                      setRecordLocal(f);
+                      // 启动应很快返回；返回后即可点停止（不再卡数秒）
+                      const f = await StartScreenRecord(selected, "");
+                      setRecordLocal(f || "");
                       setRecording(true);
+                      return f;
                     })
                   }
                 >
@@ -1490,13 +1490,18 @@ export default function App() {
                 </button>
                 <button
                   className="btn danger"
-                  disabled={busy || !selected || !recording}
+                  disabled={!selected || !recording}
                   onClick={() =>
                     run("停止录屏", async () => {
-                      const p = await StopScreenRecord(selected);
-                      setRecording(false);
-                      setRecordLocal("");
-                      return p;
+                      try {
+                        const p = await StopScreenRecord(selected);
+                        if (p) window.alert(`录屏已保存到桌面：\n${p}`);
+                        return p;
+                      } finally {
+                        // 无论成功/失败都重置，避免卡在「录屏中」无法再次开始
+                        setRecording(false);
+                        setRecordLocal("");
+                      }
                     })
                   }
                 >
