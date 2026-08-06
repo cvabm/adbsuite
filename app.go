@@ -229,6 +229,11 @@ func (a *App) EnablePackage(serial, pkg string) (string, error) {
 	return a.client.EnablePackage(serial, pkg)
 }
 
+// DiagnosePackage returns install/enable state text for troubleshooting restore issues.
+func (a *App) DiagnosePackage(serial, pkg string) (string, error) {
+	return a.client.DiagnosePackage(serial, pkg)
+}
+
 func (a *App) IsPackageDebuggable(serial, pkg string) (bool, error) {
 	return a.client.IsPackageDebuggable(serial, pkg)
 }

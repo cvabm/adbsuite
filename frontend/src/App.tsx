@@ -14,6 +14,7 @@ import {
   ForceStopPackage,
   DisablePackage,
   EnablePackage,
+  DiagnosePackage,
   IsPackageDebuggable,
   ListRunningServices,
   StopService,
@@ -133,6 +134,9 @@ export default function App() {
   const [selected, setSelected] = useState("");
   const [checked, setChecked] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
+  /** 操作失败时的可复制错误弹层 */
+  const [errorBox, setErrorBox] = useState<{ title: string; body: string } | null>(null);
+  const [errorCopied, setErrorCopied] = useState(false);
   const [info, setInfo] = useState<Record<string, string> | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [paths, setPaths] = useState<{ adb: string; scrcpy: string } | null>(null);
@@ -182,6 +186,34 @@ export default function App() {
     /* intentionally no global output panel */
   }, []);
 
+  const showError = useCallback((title: string, body: string) => {
+    setErrorCopied(false);
+    setErrorBox({ title, body });
+  }, []);
+
+  const copyErrorBody = useCallback(async () => {
+    if (!errorBox) return;
+    const text = `${errorBox.title}\n${errorBox.body}`.trim();
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setErrorCopied(true);
+    } catch {
+      setErrorCopied(false);
+      window.alert("复制失败，请手动选择文本复制");
+    }
+  }, [errorBox]);
+
   const run = useCallback(
     async <T,>(label: string, fn: () => Promise<T>): Promise<T | undefined> => {
       setBusy(true);
@@ -189,13 +221,13 @@ export default function App() {
         return await fn();
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
-        window.alert(`${label}失败：${msg}`);
+        showError(`${label}失败`, msg || "未知错误");
         return undefined;
       } finally {
         setBusy(false);
       }
     },
-    []
+    [showError]
   );
 
   const applyDevices = useCallback((list: Device[]) => {
@@ -877,14 +909,50 @@ export default function App() {
                       if (!needDevice() || !selectedPkg) return;
                       const name = appDisplayName(selectedPkg);
                       if (!window.confirm(`确定禁用「${name}」？`)) return;
-                      await DisablePackage(selected, selectedPkg.name);
-                      setPackages((prev) =>
-                        prev.map((p) =>
-                          p.name === selectedPkg.name
-                            ? { ...p, disabled: true }
-                            : p
-                        )
-                      );
+                      try {
+                        await DisablePackage(selected, selectedPkg.name);
+                        setPackages((prev) =>
+                          prev.map((p) =>
+                            p.name === selectedPkg.name
+                              ? { ...p, disabled: true }
+                              : p
+                          )
+                        );
+                        return;
+                      } catch (e: unknown) {
+                        const msg = e instanceof Error ? e.message : String(e);
+                        const protectedApp =
+                          /SecurityException|cannot change component state|系统拒绝 shell 禁用|Shell cannot change/i.test(
+                            msg
+                          );
+                        // 小米等预装保护包：pm disable 被拒时，改走当前用户卸载
+                        if (protectedApp) {
+                          const ok = window.confirm(
+                            `系统拒绝禁用「${name}」\n（${selectedPkg.name}）\n\n` +
+                              `常见于小米/HyperOS 预装保护应用。\n` +
+                              `是否改为「当前用户卸载」？效果接近禁用，无需 root。\n` +
+                              `应用会出现在「已卸载」列表；后悔可点「恢复安装」重新启用。`
+                          );
+                          if (ok) {
+                            await UninstallPackage(
+                              selected,
+                              selectedPkg.name,
+                              false,
+                              true
+                            );
+                            setPackages((prev) =>
+                              prev.map((p) =>
+                                p.name === selectedPkg.name
+                                  ? { ...p, uninstalled: true, disabled: false }
+                                  : p
+                              )
+                            );
+                            setPkgName("");
+                            return;
+                          }
+                        }
+                        throw e;
+                      }
                     })
                   }
                 >
@@ -916,6 +984,67 @@ export default function App() {
                   }
                 >
                   解除禁用
+                </button>
+                <button
+                  className="btn primary"
+                  disabled={busy || !selected || !pkgName}
+                  title="恢复系统应用（含小米超级小爱等关联包）"
+                  onClick={() =>
+                    run("恢复安装", async () => {
+                      if (!needDevice() || !selectedPkg) return;
+                      const name = appDisplayName(selectedPkg);
+                      if (
+                        !window.confirm(
+                          `确定恢复「${name}」？\n` +
+                            `将执行 install-existing + enable，并尝试恢复关联包\n` +
+                            `（如超级小爱的语音唤醒 com.miui.voicetrigger）。\n\n` +
+                            `完成后请再设默认语音助手；若仍异常把诊断结果发出来。`
+                        )
+                      ) {
+                        return;
+                      }
+                      const out = await EnablePackage(selected, selectedPkg.name);
+                      setPackages((prev) =>
+                        prev.map((p) =>
+                          p.name === selectedPkg.name
+                            ? { ...p, uninstalled: false, disabled: false }
+                            : p
+                        )
+                      );
+                      // 自动跟一条诊断，方便对照
+                      let diag = "";
+                      try {
+                        diag = (await DiagnosePackage(selected, selectedPkg.name)) || "";
+                      } catch {
+                        /* ignore */
+                      }
+                      const report = [
+                        `「${name}」恢复结果：`,
+                        String(out || "").trim(),
+                        diag ? "\n—— 诊断 ——\n" + diag : "",
+                      ]
+                        .filter(Boolean)
+                        .join("\n");
+                      showError("恢复报告（可复制）", report);
+                    })
+                  }
+                >
+                  恢复安装
+                </button>
+                <button
+                  className="btn"
+                  disabled={busy || !selected || !pkgName}
+                  title="查看包是否安装/禁用及关联包状态"
+                  onClick={() =>
+                    run("应用诊断", async () => {
+                      if (!needDevice() || !selectedPkg) return;
+                      const name = appDisplayName(selectedPkg);
+                      const diag = await DiagnosePackage(selected, selectedPkg.name);
+                      showError(`诊断：${name}`, String(diag || "(无输出)"));
+                    })
+                  }
+                >
+                  诊断
                 </button>
                 <button
                   className="btn danger"
@@ -1703,6 +1832,35 @@ export default function App() {
           )}
         </div>
       </main>
+
+      {errorBox && (
+        <div
+          className="error-modal-backdrop"
+          role="presentation"
+          onClick={() => setErrorBox(null)}
+        >
+          <div
+            className="error-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="error-modal-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="error-modal-title" id="error-modal-title">
+              {errorBox.title}
+            </div>
+            <pre className="error-modal-body mono">{errorBox.body}</pre>
+            <div className="error-modal-actions">
+              <button type="button" className="btn primary" onClick={copyErrorBody}>
+                {errorCopied ? "已复制" : "一键复制报错内容"}
+              </button>
+              <button type="button" className="btn" onClick={() => setErrorBox(null)}>
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

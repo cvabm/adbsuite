@@ -46,6 +46,10 @@ export function DeviceInfo(arg1) {
   return window['go']['main']['App']['DeviceInfo'](arg1);
 }
 
+export function DiagnosePackage(arg1, arg2) {
+  return window['go']['main']['App']['DiagnosePackage'](arg1, arg2);
+}
+
 export function DisablePackage(arg1, arg2) {
   return window['go']['main']['App']['DisablePackage'](arg1, arg2);
 }
