@@ -1,0 +1,143 @@
+# 恢复原有 main 自动升版发布流程；文档修改可手动触发。
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - ".gitignore"
+      - "LICENSE*"
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump type
+        required: false
+        default: patch
+        type: choice
+        options: [patch, minor, major]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build & Release (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.6"
+          cache: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.18.0"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Test
+        shell: pwsh
+        run: |
+          Push-Location frontend
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw 'npm ci failed' }
+          npm test
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend tests failed' }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed' }
+          Pop-Location
+          go test ./...
+          if ($LASTEXITCODE -ne 0) { throw 'Go tests failed' }
+          go vet ./...
+          if ($LASTEXITCODE -ne 0) { throw 'Go vet failed' }
+
+      - name: Resolve next version
+        id: version
+        shell: pwsh
+        env:
+          VERSION_BUMP: ${{ inputs.bump || 'patch' }}
+        run: |
+          $latest = @(git tag -l 'v*' --sort=-v:refname | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' }) | Select-Object -First 1
+          if ($latest) {
+            $numbers = $latest.Substring(1).Split('.')
+            $major = [int]$numbers[0]
+            $minor = [int]$numbers[1]
+            $patch = [int]$numbers[2]
+            switch ($env:VERSION_BUMP) {
+              'major' { $major++; $minor = 0; $patch = 0 }
+              'minor' { $minor++; $patch = 0 }
+              'patch' { $patch++ }
+              default { throw 'Unsupported version bump' }
+            }
+            $version = "v$major.$minor.$patch"
+          } else {
+            $version = 'v0.1.0'
+          }
+          Write-Host "Next release: $version"
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Build (Wails v2.13.0)
+        shell: pwsh
+        run: |
+          go run github.com/wailsapp/wails/v2/cmd/wails@v2.13.0 build -trimpath -platform windows/amd64
+          if ($LASTEXITCODE -ne 0) { throw 'Wails build failed' }
+
+      - name: Package release assets
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          foreach ($required in @('build/bin/adbsuite.exe', 'bin/platform-tools/adb.exe', 'bin/scrcpy/scrcpy.exe', 'bin/scrcpy/scrcpy-server')) {
+            if (-not (Test-Path -LiteralPath $required)) { throw "Required file missing: $required" }
+          }
+          $packageName = "adbsuite-$env:RELEASE_VERSION-windows-amd64"
+          $stage = Join-Path 'dist' $packageName
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item -LiteralPath 'build/bin/adbsuite.exe', 'README.md' -Destination $stage
+          Copy-Item -LiteralPath 'bin' -Destination (Join-Path $stage 'bin') -Recurse
+          New-Item -ItemType Directory -Path 'release' -Force | Out-Null
+          $archivePath = Join-Path 'release' "$packageName.zip"
+          Compress-Archive -LiteralPath $stage -DestinationPath $archivePath
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $archivePath).Path)
+          try {
+            $entries = @($archive.Entries.FullName | ForEach-Object { $_.Replace('\', '/') })
+            foreach ($required in @('adbsuite.exe', 'README.md', 'bin/platform-tools/adb.exe', 'bin/scrcpy/scrcpy.exe', 'bin/scrcpy/scrcpy-server')) {
+              if ($entries -notcontains "$packageName/$required") { throw "ZIP file missing: $required" }
+            }
+          } finally { $archive.Dispose() }
+
+      - name: Create tag
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a $env:RELEASE_VERSION -m "Release $env:RELEASE_VERSION"
+          if ($LASTEXITCODE -ne 0) { throw 'Tag creation failed' }
+          git push origin "refs/tags/$env:RELEASE_VERSION"
+          if ($LASTEXITCODE -ne 0) { throw 'Tag push failed' }
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ADB Suite ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          files: release/*.zip
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -59,6 +59,12 @@ bin/
 
 应用图标：`build/appicon.png` / `build/windows/icon.ico`（可用 `build/gen_icon.py` 重新生成）。
 
+## 发布
+
+由 [GitHub Actions](https://github.com/cvabm/adbsuite/actions/workflows/release.yml) 自动构建和发布 Windows ZIP，内含 exe、完整 `bin/` 与 README；不需要手动上传本地产物。
+
+推送代码到 `main` 默认自动递增一个 patch 版本并创建 Release。仅改 Markdown、`.gitignore` 或 `LICENSE*` 不触发发布；需要发布时可手动运行 Release workflow，选择 patch/minor/major。版本以 Actions 创建的 `vMAJOR.MINOR.PATCH` tag 为准，不要提前手动创建 tag。以 workflow 成功且 Release ZIP 附件就绪为发布完成。
+
 ## 配置
 
 设置保存在用户配置目录：
