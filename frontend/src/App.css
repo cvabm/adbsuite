@@ -465,6 +465,47 @@ tr.row-active td {
   opacity: 0.8;
 }
 
+/* Keep the app summary at two fixed lines, even before metadata arrives.
+   Long names/IDs must shrink inside the row rather than reflow the toolbar. */
+.apps-selected-stable {
+  height: 48px;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.apps-selected-stable .apps-selected-line1,
+.apps-selected-stable .apps-selected-line2 {
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+  height: 22px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.apps-selected-stable .text-strong,
+.apps-selected-stable .apps-selected-pkg,
+.apps-selected-stable .apps-selected-ver {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: normal;
+}
+
+.apps-selected-stable .text-strong,
+.apps-selected-stable .apps-selected-pkg {
+  flex: 1 1 0;
+}
+
+.apps-selected-stable .apps-selected-ver {
+  flex: 0 1 auto;
+  max-width: 45%;
+}
+
+.apps-selected-stable .app-badge {
+  flex-shrink: 0;
+}
+
 .apps-list.table-wrap {
   flex: 1;
   min-height: 0;
@@ -923,6 +964,93 @@ tr.row-active td {
   font-size: 0.88rem;
   color: var(--text);
   font-weight: 500;
+}
+
+.settings-form {
+  max-width: 720px;
+  gap: 20px;
+}
+
+.settings-group {
+  min-width: 0;
+}
+
+.settings-group h3 {
+  margin: 0 0 12px;
+  font-size: 0.95rem;
+}
+
+.settings-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 12px 16px;
+}
+
+.settings-fields label,
+.settings-fields input,
+.settings-fields select {
+  min-width: 0;
+}
+
+.settings-options {
+  margin-top: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg2);
+}
+
+/* More specific than .form label, which stacks ordinary form fields. */
+.settings-form .settings-option {
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+
+.settings-option + .settings-option {
+  border-top: 1px solid var(--border);
+}
+
+.settings-option:hover {
+  background: var(--row-hover);
+}
+
+.settings-option:focus-within {
+  box-shadow: inset 0 0 0 2px var(--primary);
+}
+
+.settings-option input[type="checkbox"] {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--primary);
+}
+
+.settings-option-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  line-height: 1.4;
+}
+
+.settings-option-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 400;
+}
+
+.settings-actions {
+  flex-wrap: wrap;
+}
+
+.settings-form .paths {
+  line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .paths {

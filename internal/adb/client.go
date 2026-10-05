@@ -13,6 +13,7 @@ import (
 
 type Client struct {
 	AdbPath func() string
+	command func(context.Context, string, ...string) *exec.Cmd
 }
 
 type Result struct {
@@ -40,7 +41,11 @@ func (c *Client) Run(ctx context.Context, serial string, args ...string) (Result
 		cmdArgs = append(cmdArgs, "-s", serial)
 	}
 	cmdArgs = append(cmdArgs, args...)
-	cmd := exec.CommandContext(ctx, c.path(), cmdArgs...)
+	command := c.command
+	if command == nil {
+		command = exec.CommandContext
+	}
+	cmd := command(ctx, c.path(), cmdArgs...)
 	procutil.HideConsole(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

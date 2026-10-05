@@ -27,14 +27,15 @@ import (
 // PackageInfo is one installed app.
 // Name is the package id (for adb ops); Label is the human display name.
 type PackageInfo struct {
-	Name        string `json:"name"`
-	Label       string `json:"label"`
-	Path        string `json:"path,omitempty"`
-	System      bool   `json:"system"` // true = system app, false = user/third-party
-	VersionName string `json:"versionName,omitempty"`
-	VersionCode int64  `json:"versionCode,omitempty"`
-	Disabled    bool   `json:"disabled,omitempty"`    // pm disabled
-	Uninstalled bool   `json:"uninstalled,omitempty"` // residual after uninstall (--user / -u)
+	Name         string `json:"name"`
+	Label        string `json:"label"`
+	Path         string `json:"path,omitempty"`
+	System       bool   `json:"system"` // true = system app, false = user/third-party
+	VersionName  string `json:"versionName,omitempty"`
+	VersionCode  int64  `json:"versionCode,omitempty"`
+	Disabled     bool   `json:"disabled,omitempty"`     // pm disabled
+	Uninstalled  bool   `json:"uninstalled,omitempty"`  // residual after uninstall (--user / -u)
+	LabelPending bool   `json:"labelPending,omitempty"` // cache miss; resolve after displaying the list
 }
 
 func (c *Client) Install(serial, apkPath string, reinstall, downgrade, grantAll bool) (string, error) {
@@ -115,18 +116,7 @@ func (c *Client) ListPackages(serial string, filter string) ([]PackageInfo, erro
 	// Fill versionName / versionCode from dumpsys (one bulk call).
 	c.fillVersions(serial, list)
 
-	// Sort: active third → active system → disabled → uninstalled; name within group.
-	sort.Slice(list, func(i, j int) bool {
-		ki, kj := packageSortKey(list[i]), packageSortKey(list[j])
-		if ki != kj {
-			return ki < kj
-		}
-		li, lj := list[i].Label, list[j].Label
-		if li == lj {
-			return list[i].Name < list[j].Name
-		}
-		return strings.ToLower(li) < strings.ToLower(lj)
-	})
+	sortPackages(list)
 
 	if filter == "all" {
 		return list, nil
@@ -153,6 +143,69 @@ func (c *Client) ListPackages(serial string, filter string) ([]PackageInfo, erro
 		}
 	}
 	return out, nil
+}
+
+// ListPackageBasics does not read APK resources or dump version information.
+// Cached names are immediately usable; cache misses retain a package-name fallback.
+func (c *Client) ListPackageBasics(serial string) ([]PackageInfo, error) {
+	list, err := c.listAllPackages(serial)
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		if list[i].Path == "" {
+			continue
+		}
+		if label, ok := getCachedLabel(list[i].Name, list[i].Path); ok {
+			list[i].Label = label
+		} else {
+			list[i].LabelPending = true
+		}
+	}
+	sortPackages(list)
+	return list, nil
+}
+
+// PackageLabels resolves one small batch, without re-fetching the device list.
+func (c *Client) PackageLabels(serial string, list []PackageInfo) []PackageInfo {
+	list = append([]PackageInfo{}, list...)
+	c.fillLabels(serial, list)
+	for i := range list {
+		list[i].LabelPending = false
+	}
+	return list
+}
+
+// PackageVersions runs independently of the slower uncached name resolution.
+func (c *Client) PackageVersions(serial string, list []PackageInfo) ([]PackageInfo, error) {
+	list = append([]PackageInfo{}, list...)
+	if len(list) == 0 {
+		return list, nil
+	}
+	versions := c.fetchVersionsDumpsys(serial)
+	if len(versions) == 0 {
+		versions = c.fetchVersionCodesOnly(serial)
+	}
+	if len(versions) == 0 {
+		return nil, fmt.Errorf("无法读取应用版本信息，可重新刷新；应用列表仍可使用")
+	}
+	applyPackageVersions(list, versions)
+	return list, nil
+}
+
+func sortPackages(list []PackageInfo) {
+	// active third → active system → disabled → uninstalled; name within group.
+	sort.Slice(list, func(i, j int) bool {
+		ki, kj := packageSortKey(list[i]), packageSortKey(list[j])
+		if ki != kj {
+			return ki < kj
+		}
+		li, lj := list[i].Label, list[j].Label
+		if li == lj {
+			return list[i].Name < list[j].Name
+		}
+		return strings.ToLower(li) < strings.ToLower(lj)
+	})
 }
 
 func packageSortKey(p PackageInfo) int {
@@ -767,6 +820,10 @@ func (c *Client) fillVersions(serial string, list []PackageInfo) {
 	if len(vers) == 0 {
 		return
 	}
+	applyPackageVersions(list, vers)
+}
+
+func applyPackageVersions(list []PackageInfo, vers map[string]pkgVersion) {
 	for i := range list {
 		if v, ok := vers[list[i].Name]; ok {
 			if v.Name != "" {

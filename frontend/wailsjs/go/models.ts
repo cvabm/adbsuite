@@ -33,6 +33,7 @@ export namespace adb {
 	    versionCode?: number;
 	    disabled?: boolean;
 	    uninstalled?: boolean;
+	    labelPending?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new PackageInfo(source);
@@ -48,6 +49,7 @@ export namespace adb {
 	        this.versionCode = source["versionCode"];
 	        this.disabled = source["disabled"];
 	        this.uninstalled = source["uninstalled"];
+	        this.labelPending = source["labelPending"];
 	    }
 	}
 	export class RecordSession {

@@ -17,6 +17,7 @@ import {
   SelectFile,
   SelectSaveFile,
 } from "../../wailsjs/go/main/App";
+import { createRequestGuard } from "../requestGuard";
 
 export type RemoteEntry = {
   name: string;
@@ -107,11 +108,21 @@ export default function DeviceExplorer({ serial, busy, setBusy, log }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [ctx, setCtx] = useState<CtxMenu | null>(null);
-  const lastSerial = useRef("");
+  const requests = useRef(createRequestGuard());
+  const operationActive = useRef(false);
   const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const guard = requests.current;
+    guard.activate();
+    return () => guard.dispose();
+  }, []);
 
   const run = useCallback(
     async <T,>(label: string, fn: () => Promise<T>): Promise<T | undefined> => {
+      // A file dialog may resolve after this device view has been unmounted.
+      if (!requests.current.active() || busy || operationActive.current) return undefined;
+      operationActive.current = true;
       setBusy(true);
       try {
         const r = await fn();
@@ -120,17 +131,20 @@ export default function DeviceExplorer({ serial, busy, setBusy, log }: Props) {
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         log(`${label}: 失败 — ${msg}`);
-        setError(msg);
+        if (requests.current.active()) setError(msg);
         return undefined;
       } finally {
+        operationActive.current = false;
         setBusy(false);
       }
     },
-    [log, setBusy]
+    [log, setBusy, busy]
   );
 
   const refresh = useCallback(
     async (path?: string, silent = false) => {
+      if (!requests.current.active()) return;
+      const ticket = requests.current.begin();
       if (!serial) {
         setEntries([]);
         setError("请先选择设备");
@@ -141,6 +155,7 @@ export default function DeviceExplorer({ serial, busy, setBusy, log }: Props) {
       setError("");
       try {
         const list = ((await ListRemoteEntries(serial, target)) as RemoteEntry[]) || [];
+        if (!requests.current.current(ticket)) return;
         setEntries(list);
         setCwd(target);
         setPathInput(target);
@@ -149,12 +164,13 @@ export default function DeviceExplorer({ serial, busy, setBusy, log }: Props) {
           log(`列出 ${target} · ${list.length} 项`);
         }
       } catch (e: unknown) {
+        if (!requests.current.current(ticket)) return;
         const msg = e instanceof Error ? e.message : String(e);
         setError(msg);
         setEntries([]);
         if (!silent) log(`列出失败: ${msg}`);
       } finally {
-        setLoading(false);
+        if (requests.current.current(ticket)) setLoading(false);
       }
     },
     [serial, cwd, log]
@@ -162,16 +178,16 @@ export default function DeviceExplorer({ serial, busy, setBusy, log }: Props) {
 
   // Load when device changes or first mount with device
   useEffect(() => {
+    setEntries([]);
+    setSelected({});
+    setCtx(null);
     if (!serial) {
-      setEntries([]);
+      setLoading(false);
       setError("请先选择设备");
       return;
     }
-    if (lastSerial.current !== serial) {
-      lastSerial.current = serial;
-      // reset to common start path
-      void refresh("/sdcard", true);
-    }
+    // The view is keyed by device; this also reloads on StrictMode remount.
+    void refresh("/sdcard", true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serial]);
 
@@ -358,6 +374,7 @@ export default function DeviceExplorer({ serial, busy, setBusy, log }: Props) {
   const onRowContext = (e: ReactMouseEvent, entry: RemoteEntry | null) => {
     e.preventDefault();
     e.stopPropagation();
+    if (busy || loading || !serial) return;
     if (entry && !selected[entry.path]) {
       setSelected({ [entry.path]: true });
     }
@@ -517,8 +534,8 @@ export default function DeviceExplorer({ serial, busy, setBusy, log }: Props) {
                         (isSel ? "row-active " : "") +
                         (e.isDir ? "explorer-dir " : "explorer-file ")
                       }
-                      onClick={(ev) => toggleSelect(e.path, ev.ctrlKey || ev.metaKey || ev.shiftKey)}
-                      onDoubleClick={() => openEntry(e)}
+                      onClick={(ev) => !disabled && toggleSelect(e.path, ev.ctrlKey || ev.metaKey || ev.shiftKey)}
+                      onDoubleClick={() => !disabled && openEntry(e)}
                       onContextMenu={(ev) => onRowContext(ev, e)}
                     >
                       <td className="explorer-icon">{entryIcon(e)}</td>

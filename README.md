@@ -17,6 +17,8 @@
 | **日志** | 实时 logcat；V/D/I/W/E/A 等级勾选与色块；关键字过滤；暂停 / 滚底 |
 | **设置** | 主题（浅/深）、批量并发、scrcpy 默认参数 |
 
+应用刷新先显示包列表和已缓存的应用名，再后台分批补齐未缓存名称、并行读取版本；首次无需等所有 APK 资源解析完成。补齐过程中仍可搜索和操作应用；名称未解析时暂显示包名末段，按应用名/版本搜索的结果会随信息补齐更新。切换设备或再次刷新后旧结果不会覆盖新列表；信息读取失败不影响已有列表。
+
 ## 目录结构（运行时）
 
 ```text
@@ -32,18 +34,18 @@ bin/
 
 ## 开发
 
-环境：Go 1.25+、Node 18+、[Wails v2](https://wails.io/)、Windows 需 WebView2。
+已验证环境：Go 1.26.6、Node.js 24.18.0、[Wails v2.13.0](https://wails.io/)，Windows 需 WebView2。项目锁定 Go 1.26.6 工具链；自动工具链启用时会按需下载。
 
 ```bash
 git clone https://github.com/cvabm/adbsuite.git
 cd adbsuite
-wails dev
+go run github.com/wailsapp/wails/v2/cmd/wails@v2.13.0 dev
 ```
 
 ## 打包
 
 ```bash
-wails build
+go run github.com/wailsapp/wails/v2/cmd/wails@v2.13.0 build -trimpath -platform windows/amd64
 ```
 
 产物：`build/bin/adbsuite.exe`。把项目里的 **`bin/` 整夹** 复制到 exe 同级后再分发：
@@ -62,6 +64,36 @@ bin/
 设置保存在用户配置目录：
 
 - Windows：`%AppData%\adbsuite\settings.json`
+
+## 测试与安全保护
+
+```powershell
+cd frontend
+npm ci
+npm test
+npm run build
+cd ..
+go test -race -count=3 ./...
+go vet ./...
+```
+
+竞态检查需要 PATH 中可用的 GCC。前端请求隔离测试使用 Node.js 的 TypeScript 类型擦除能力，建议使用上述已验证的 Node 版本。
+
+- 切换设备会重建文件视图，旧目录请求不能覆盖当前结果；文件操作执行中禁止手动切换设备。
+- 投屏与日志按实际进程身份清理；日志事件另带会话标识，旧事件不能改变新会话状态。
+- 停止录屏仅针对本次 PID，且验证 `screenrecord` 可执行文件名和精确输出路径；不执行全局停止录屏，也不回收其他录屏文件。无法确认停止时保留会话供重试；设备原有的 180 秒录屏上限不变。
+- 投屏异常退出及端口操作失败会显示错误，而不是无条件提示成功。
+
+已有设备的只读验证可选择运行：
+
+```powershell
+$env:ADBSUITE_TEST_ADB = (Resolve-Path .\bin\platform-tools\adb.exe).Path
+$env:ADBSUITE_TEST_SERIAL = '你的设备序列号'
+go test -race -run '^TestConnectedDeviceReadOnly$' -v ./internal/adb
+Remove-Item Env:ADBSUITE_TEST_ADB, Env:ADBSUITE_TEST_SERIAL
+```
+
+该检查只读取设备信息、目录、端口列表和日志，不清空 logcat、不写入或删除手机文件、不启动或停止手机录屏。模拟进程回归测试不需要连接手机；图形界面及真实录屏流程仍需人工验收。
 
 ## License
 

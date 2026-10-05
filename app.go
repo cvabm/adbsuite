@@ -42,6 +42,13 @@ func (a *App) startup(ctx context.Context) {
 	a.store = store
 	a.client = &adb.Client{AdbPath: a.adbPath}
 	a.scrcpy = scrcpy.New(a.scrcpyPath)
+	a.scrcpy.OnExit(func(session scrcpy.Session, err error) {
+		if err != nil {
+			runtime.EventsEmit(a.ctx, "scrcpy:error", map[string]string{
+				"serial": session.Serial, "message": err.Error(),
+			})
+		}
+	})
 	a.logcat = logcat.New()
 	// Android Studio–style: adb shell screenrecord + Ctrl+C finalize (no scrcpy window).
 	a.recorder = adb.NewRecorder(a.adbPath)
@@ -62,13 +69,13 @@ func (a *App) startup(ctx context.Context) {
 
 // Bootstrap 一次返回启动所需数据，减少前端多次往返/重绘
 type BootstrapData struct {
-	Settings settings.Settings   `json:"settings"`
-	Paths    map[string]string   `json:"paths"`
-	Devices  []adb.Device        `json:"devices"`
-	Scrcpy   []scrcpy.Session    `json:"scrcpy"`
-	Tasks    []tasks.Item        `json:"tasks"`
-	AdbOK    bool                `json:"adbOk"`
-	AdbMsg   string              `json:"adbMsg"`
+	Settings settings.Settings `json:"settings"`
+	Paths    map[string]string `json:"paths"`
+	Devices  []adb.Device      `json:"devices"`
+	Scrcpy   []scrcpy.Session  `json:"scrcpy"`
+	Tasks    []tasks.Item      `json:"tasks"`
+	AdbOK    bool              `json:"adbOk"`
+	AdbMsg   string            `json:"adbMsg"`
 }
 
 func (a *App) Bootstrap() BootstrapData {
@@ -210,6 +217,18 @@ func (a *App) ListPackages(serial string, filter string) ([]adb.PackageInfo, err
 	return a.client.ListPackages(serial, filter)
 }
 
+func (a *App) ListPackageBasics(serial string) ([]adb.PackageInfo, error) {
+	return a.client.ListPackageBasics(serial)
+}
+
+func (a *App) PackageLabels(serial string, list []adb.PackageInfo) []adb.PackageInfo {
+	return a.client.PackageLabels(serial, list)
+}
+
+func (a *App) PackageVersions(serial string, list []adb.PackageInfo) ([]adb.PackageInfo, error) {
+	return a.client.PackageVersions(serial, list)
+}
+
 func (a *App) ClearPackage(serial, pkg string) (string, error) {
 	return a.client.ClearPackage(serial, pkg)
 }
@@ -324,15 +343,11 @@ func (a *App) Reverse(serial, remote, local string) (string, error) {
 }
 
 func (a *App) PortList(serial string) (map[string]string, error) {
-	fw, _ := a.client.ForwardList(serial)
-	rv, _ := a.client.ReverseList(serial)
-	return map[string]string{"forward": fw, "reverse": rv}, nil
+	return a.client.PortList(serial)
 }
 
 func (a *App) PortRemoveAll(serial string) error {
-	_ = a.client.ForwardRemoveAll(serial)
-	_ = a.client.ReverseRemoveAll(serial)
-	return nil
+	return a.client.PortRemoveAll(serial)
 }
 
 // ---------- scrcpy ----------
@@ -364,14 +379,18 @@ func (a *App) IsScrcpyRunning(serial string) bool {
 
 // ---------- logcat ----------
 
-func (a *App) StartLogcat(serial string, clearFirst bool) error {
+func (a *App) StartLogcat(serial string, clearFirst bool, session string) error {
+	if session == "" {
+		return fmt.Errorf("缺少日志会话标识")
+	}
 	return a.logcat.Start(a.adbPath(), serial, clearFirst, func(line string) {
-		runtime.EventsEmit(a.ctx, "logcat:line", line)
+		runtime.EventsEmit(a.ctx, "logcat:line", map[string]string{"session": session, "line": line})
 	}, func(reason, message string) {
 		runtime.EventsEmit(a.ctx, "logcat:stopped", map[string]string{
 			"reason":  reason,
 			"message": message,
 			"serial":  serial,
+			"session": session,
 		})
 	})
 }

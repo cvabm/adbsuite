@@ -1,7 +1,7 @@
 package adb
 
 import (
-	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -15,6 +15,7 @@ import (
 
 	"adbsuite/internal/paths"
 	"adbsuite/internal/procutil"
+	"github.com/google/uuid"
 )
 
 // RecordSession is a manual screenrecord job (start now, stop later).
@@ -33,27 +34,30 @@ type RecordSession struct {
 // Stop = Ctrl+C to the host adb process (SIGINT forwarded to screenrecord) so
 // the mp4 gets a valid moov atom, then pull to Desktop. No scrcpy window.
 type Recorder struct {
-	mu   sync.Mutex
-	adb  func() string
-	jobs map[string]*recordJob
+	mu       sync.Mutex
+	adb      func() string
+	jobs     map[string]*recordJob
+	starting map[string]bool
 }
 
 type recordJob struct {
 	cmd       *exec.Cmd
 	done      chan struct{}
-	stderr    *bytes.Buffer
+	stderr    *procutil.Output
 	localPath string
 	remote    string
 	pidFile   string
 	remotePID int
 	startedAt int64
 	waitErr   error
+	stopping  bool
 }
 
 func NewRecorder(adbPath func() string) *Recorder {
 	return &Recorder{
-		adb:  adbPath,
-		jobs: map[string]*recordJob{},
+		adb:      adbPath,
+		jobs:     map[string]*recordJob{},
+		starting: map[string]bool{},
 	}
 }
 
@@ -62,14 +66,16 @@ const remoteRecordDir = "/sdcard/Movies"
 // Start begins device screenrecord. Empty localPath → Desktop timestamped file.
 func (r *Recorder) Start(serial, localPath string) (string, error) {
 	r.mu.Lock()
-	if _, ok := r.jobs[serial]; ok {
+	if _, ok := r.jobs[serial]; ok || r.starting[serial] {
 		r.mu.Unlock()
 		return "", fmt.Errorf("设备 %s 已在录屏中", serial)
 	}
+	r.starting[serial] = true
 	r.mu.Unlock()
+	defer func() { r.mu.Lock(); delete(r.starting, serial); r.mu.Unlock() }()
 
 	if localPath == "" {
-		localPath = paths.DesktopFile(fmt.Sprintf("adbsuite_%d.mp4", time.Now().Unix()))
+		localPath = paths.DesktopFile(fmt.Sprintf("adbsuite_%d.mp4", time.Now().UnixNano()))
 	}
 	if dir := filepath.Dir(localPath); dir != "" && dir != "." {
 		_ = os.MkdirAll(dir, 0o755)
@@ -79,23 +85,27 @@ func (r *Recorder) Start(serial, localPath string) (string, error) {
 	}
 
 	ts := time.Now().Unix()
-	remote := fmt.Sprintf("%s/adbsuite_rec_%d.mp4", remoteRecordDir, ts)
-	pidFile := fmt.Sprintf("%s/adbsuite_rec_%d.pid", remoteRecordDir, ts)
+	id := uuid.NewString()
+	remote := fmt.Sprintf("%s/adbsuite_rec_%s.mp4", remoteRecordDir, id)
+	pidFile := fmt.Sprintf("%s/adbsuite_rec_%s.pid", remoteRecordDir, id)
 
-	prep := exec.Command(r.adb(), withSerial(serial, "shell", "sh", "-c",
-		fmt.Sprintf("mkdir -p %s; rm -f %s %s", remoteRecordDir, remote, pidFile))...)
+	prepCtx, prepCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer prepCancel()
+	prep := exec.CommandContext(prepCtx, r.adb(), withSerial(serial, "shell", "mkdir -p "+shellQuote(remoteRecordDir))...)
 	procutil.HideConsole(prep)
-	_ = prep.Run()
+	if output, err := prep.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("准备录屏目录失败: %w；%s", err, strings.TrimSpace(string(output)))
+	}
 
 	// Same model as Android Studio / CLI:
 	//   adb shell screenrecord /sdcard/Movies/xxx.mp4
 	// Write shell pid then exec so kill -INT $pid targets screenrecord after exec.
 	// Host adb is started interruptible so Stop can send Ctrl+C (→ remote SIGINT).
-	script := fmt.Sprintf("echo $$ > %s; exec screenrecord --time-limit 180 %s", pidFile, remote)
-	args := withSerial(serial, "shell", "sh", "-c", script)
+	script := fmt.Sprintf("echo $$ > %s; exec screenrecord --time-limit 180 %s", shellQuote(pidFile), shellQuote(remote))
+	args := withSerial(serial, "shell", "sh", "-c", shellQuote(script))
 	cmd := exec.Command(r.adb(), args...)
 	procutil.HideConsoleInterruptible(cmd)
-	var stderr bytes.Buffer
+	var stderr procutil.Output
 	cmd.Stdout = nil
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
@@ -155,7 +165,9 @@ func (r *Recorder) Start(serial, localPath string) (string, error) {
 	case <-done:
 		msg := strings.TrimSpace(stderr.String())
 		r.mu.Lock()
-		delete(r.jobs, serial)
+		if r.jobs[serial] == job {
+			delete(r.jobs, serial)
+		}
 		r.mu.Unlock()
 		if msg == "" {
 			msg = "screenrecord 立即退出（设备可能不支持或无存储权限）"
@@ -174,9 +186,25 @@ func (r *Recorder) Stop(serial string, client *Client) (string, error) {
 		r.mu.Unlock()
 		return "", fmt.Errorf("设备 %s 未在录屏", serial)
 	}
-	delete(r.jobs, serial)
+	if job.stopping {
+		r.mu.Unlock()
+		return "", fmt.Errorf("设备 %s 正在停止录屏", serial)
+	}
+	job.stopping = true
 	remotePID := job.remotePID
 	r.mu.Unlock()
+	finished := false
+	defer func() {
+		r.mu.Lock()
+		if r.jobs[serial] == job {
+			if finished {
+				delete(r.jobs, serial)
+			} else {
+				job.stopping = false
+			}
+		}
+		r.mu.Unlock()
+	}()
 
 	// No artificial minimum duration — Android Studio also stops immediately.
 	// We only wait for screenrecord to actually exit after SIGINT (usually <1s).
@@ -186,7 +214,7 @@ func (r *Recorder) Stop(serial string, client *Client) (string, error) {
 	if !alreadyDone {
 		// 1) Device-side SIGINT (primary on many Windows setups where console
 		//    events do not reach adb). screenrecord writes moov on SIGINT.
-		signalScreenrecord(client, serial, job.pidFile, remotePID)
+		signalScreenrecord(client, serial, job.pidFile, remotePID, job.remote)
 
 		// 2) Host-side Ctrl+C / CTRL_BREAK — same as terminal stop in Studio/CLI.
 		if job.cmd != nil && job.cmd.Process != nil {
@@ -195,11 +223,11 @@ func (r *Recorder) Stop(serial string, client *Client) (string, error) {
 
 		// Wait until adb shell exits (finalize finished). Fast path: often 100–800ms.
 		if !waitJobDone(job, 5*time.Second) {
-			signalScreenrecord(client, serial, job.pidFile, remotePID)
+			signalScreenrecord(client, serial, job.pidFile, remotePID, job.remote)
 			if job.cmd != nil && job.cmd.Process != nil {
 				_ = procutil.InterruptPID(job.cmd.Process.Pid)
 			}
-			_ = waitRemoteProcessGone(client, serial, remotePID, job.pidFile, 3*time.Second)
+			_ = waitRemoteProcessGone(client, serial, remotePID, job.pidFile, job.remote, 3*time.Second)
 			if !waitJobDone(job, 3*time.Second) {
 				// Last resort only — may yield incomplete file; still try pull+validate.
 				if job.cmd != nil && job.cmd.Process != nil {
@@ -209,16 +237,15 @@ func (r *Recorder) Stop(serial string, client *Client) (string, error) {
 			}
 		}
 	}
+	if !waitJobDone(job, time.Second) || !waitRemoteProcessGone(client, serial, remotePID, job.pidFile, job.remote, 3*time.Second) {
+		return "", fmt.Errorf("无法确认本次录屏已停止，设备文件保留在 %s；未停止其他录屏", job.remote)
+	}
+	finished = true
 
 	// Brief readiness poll (exits as soon as size is stable; no fixed 2s sleep).
 	_ = waitRemoteFileReady(client, serial, job.remote, 3*time.Second)
 
 	remote := job.remote
-	if _, err := remoteFileSize(client, serial, remote); err != nil {
-		if alt := findRemoteRecording(client, serial, job.startedAt); alt != "" {
-			remote = alt
-		}
-	}
 
 	local := job.localPath
 	var lastErr error
@@ -241,7 +268,7 @@ func (r *Recorder) Stop(serial string, client *Client) (string, error) {
 			lastErr = err
 			continue
 		}
-		_, _ = client.Shell(serial, fmt.Sprintf("rm -f %s %s", remote, job.pidFile))
+		_, _ = client.Shell(serial, fmt.Sprintf("rm -f %s %s", shellQuote(remote), shellQuote(job.pidFile)))
 		return local, nil
 	}
 
@@ -254,39 +281,38 @@ func (r *Recorder) Stop(serial string, client *Client) (string, error) {
 	return "", fmt.Errorf("停止录屏失败：未得到可播放文件")
 }
 
-func signalScreenrecord(client *Client, serial, pidFile string, pid int) {
-	var b strings.Builder
-	if pid > 0 {
-		fmt.Fprintf(&b, "kill -2 %d 2>/dev/null || kill -INT %d 2>/dev/null || true; ", pid, pid)
-	}
+// Inspect both executable and exact output argument before signalling an owned PID.
+// Never enumerate/kill all screenrecord processes, including as a fallback.
+func recordingProcessCommand(pidFile string, pid int, remote string, signal bool) string {
+	prefix := fmt.Sprintf("p=%d\n", pid)
 	if pidFile != "" {
-		fmt.Fprintf(&b, "p=$(cat %s 2>/dev/null); if [ -n \"$p\" ]; then kill -2 $p 2>/dev/null || kill -INT $p 2>/dev/null || true; fi; ", pidFile)
+		prefix += "if [ \"$p\" -le 0 ]; then p=$(cat " + shellQuote(pidFile) + " 2>/dev/null); fi\n"
 	}
-	b.WriteString(`pid=$(pidof screenrecord 2>/dev/null || true)
-if [ -z "$pid" ]; then pid=$(ps -A 2>/dev/null | grep '[s]creenrecord' | awk '{print $2}' | tr '\n' ' '); fi
-if [ -n "$pid" ]; then kill -2 $pid 2>/dev/null || kill -INT $pid 2>/dev/null || true; fi
-killall -2 screenrecord 2>/dev/null || true
-pkill -2 screenrecord 2>/dev/null || true
-true`)
-	_, _ = client.Shell(serial, b.String())
+	prefix += `case "$p" in ''|0|*[!0-9]*) echo UNKNOWN; exit 1;; esac
+if [ ! -d "/proc/$p" ]; then echo GONE; exit 0; fi
+if [ ! -r "/proc/$p/cmdline" ]; then echo UNKNOWN; exit 1; fi
+args=$(tr '\000' '\n' < "/proc/$p/cmdline")
+exe=$(printf '%s\n' "$args" | head -n 1)
+case "${exe##*/}" in screenrecord) ;; *) echo GONE; exit 0;; esac
+`
+	prefix += "if ! printf '%s\\n' \"$args\" | grep -F -x -- " + shellQuote(remote) + "; then echo GONE; exit 0; fi\n"
+	if signal {
+		return prefix + "kill -2 \"$p\"\n"
+	}
+	return prefix + "echo ALIVE\n"
 }
 
-func waitRemoteProcessGone(client *Client, serial string, pid int, pidFile string, timeout time.Duration) bool {
+func signalScreenrecord(client *Client, serial, pidFile string, pid int, remote string) {
+	_, _ = client.Shell(serial, recordingProcessCommand(pidFile, pid, remote, true))
+}
+
+func waitRemoteProcessGone(client *Client, serial string, pid int, pidFile, remote string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if pid > 0 {
-			res, _ := client.Shell(serial, fmt.Sprintf(
-				"if kill -0 %d 2>/dev/null; then echo ALIVE; else echo DEAD; fi", pid))
-			if strings.Contains(res.Stdout, "DEAD") {
-				return true
-			}
-		} else {
-			res, _ := client.Shell(serial, "pidof screenrecord 2>/dev/null || true")
-			if strings.TrimSpace(res.Stdout) == "" {
-				return true
-			}
+		res, err := client.RunTimeout(serial, 2*time.Second, "shell", recordingProcessCommand(pidFile, pid, remote, false))
+		if err == nil && strings.HasSuffix(strings.TrimSpace(res.Stdout), "GONE") {
+			return true
 		}
-		_ = pidFile
 		time.Sleep(80 * time.Millisecond)
 	}
 	return false
@@ -372,7 +398,9 @@ func remoteFileSize(client *Client, serial, remote string) (int64, error) {
 
 func readRemotePID(adbPath func() string, serial, pidFile string) (int, error) {
 	args := withSerial(serial, "shell", "cat", pidFile)
-	cmd := exec.Command(adbPath(), args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, adbPath(), args...)
 	procutil.HideConsole(cmd)
 	out, err := cmd.Output()
 	if err != nil {
@@ -391,36 +419,6 @@ func readRemotePID(adbPath func() string, serial, pidFile string) (int, error) {
 		return 0, fmt.Errorf("bad pid %q", s)
 	}
 	return n, nil
-}
-
-func findRemoteRecording(client *Client, serial string, startedAt int64) string {
-	candidates := []string{
-		fmt.Sprintf("%s/adbsuite_rec_%d.mp4", remoteRecordDir, startedAt),
-		fmt.Sprintf("/sdcard/adbsuite_rec_%d.mp4", startedAt),
-		fmt.Sprintf("/storage/emulated/0/Movies/adbsuite_rec_%d.mp4", startedAt),
-	}
-	for _, p := range candidates {
-		if sz, err := remoteFileSize(client, serial, p); err == nil && sz > 0 {
-			return p
-		}
-	}
-	res, err := client.Shell(serial, "ls -1 "+remoteRecordDir+"/adbsuite_rec_*.mp4 2>/dev/null")
-	if err == nil {
-		for _, line := range strings.Split(res.Stdout, "\n") {
-			line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
-			if line == "" || strings.Contains(line, "*") {
-				continue
-			}
-			p := line
-			if !strings.HasPrefix(p, "/") {
-				p = remoteRecordDir + "/" + line
-			}
-			if sz, e := remoteFileSize(client, serial, p); e == nil && sz > 0 {
-				return p
-			}
-		}
-	}
-	return ""
 }
 
 func validateMP4File(path string) error {

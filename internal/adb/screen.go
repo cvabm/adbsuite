@@ -1,6 +1,7 @@
 package adb
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -69,4 +70,27 @@ func (c *Client) ForwardRemoveAll(serial string) error {
 func (c *Client) ReverseRemoveAll(serial string) error {
 	_, err := c.RunTimeout(serial, 10*time.Second, "reverse", "--remove-all")
 	return err
+}
+
+func (c *Client) PortList(serial string) (map[string]string, error) {
+	fw, fwErr := c.ForwardList(serial)
+	rv, rvErr := c.ReverseList(serial)
+	return map[string]string{"forward": fw, "reverse": rv}, portErrors(fwErr, rvErr)
+}
+
+func (c *Client) PortRemoveAll(serial string) error {
+	// Try both directions even if the first one fails; report partial failures.
+	fwErr := c.ForwardRemoveAll(serial)
+	rvErr := c.ReverseRemoveAll(serial)
+	return portErrors(fwErr, rvErr)
+}
+
+func portErrors(forward, reverse error) error {
+	if forward != nil {
+		forward = fmt.Errorf("forward: %w", forward)
+	}
+	if reverse != nil {
+		reverse = fmt.Errorf("reverse: %w", reverse)
+	}
+	return errors.Join(forward, reverse)
 }

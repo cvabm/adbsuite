@@ -110,6 +110,10 @@ export function ListDevices() {
   return window['go']['main']['App']['ListDevices']();
 }
 
+export function ListPackageBasics(arg1) {
+  return window['go']['main']['App']['ListPackageBasics'](arg1);
+}
+
 export function ListPackages(arg1, arg2) {
   return window['go']['main']['App']['ListPackages'](arg1, arg2);
 }
@@ -140,6 +144,14 @@ export function ListTasks() {
 
 export function MkdirRemote(arg1, arg2) {
   return window['go']['main']['App']['MkdirRemote'](arg1, arg2);
+}
+
+export function PackageLabels(arg1, arg2) {
+  return window['go']['main']['App']['PackageLabels'](arg1, arg2);
+}
+
+export function PackageVersions(arg1, arg2) {
+  return window['go']['main']['App']['PackageVersions'](arg1, arg2);
 }
 
 export function Pair(arg1, arg2) {
@@ -198,8 +210,8 @@ export function Shell(arg1, arg2) {
   return window['go']['main']['App']['Shell'](arg1, arg2);
 }
 
-export function StartLogcat(arg1, arg2) {
-  return window['go']['main']['App']['StartLogcat'](arg1, arg2);
+export function StartLogcat(arg1, arg2, arg3) {
+  return window['go']['main']['App']['StartLogcat'](arg1, arg2, arg3);
 }
 
 export function StartScrcpy(arg1) {

@@ -8,7 +8,9 @@ import {
   GetToolPaths,
   InstallApk,
   UninstallPackage,
-  ListPackages,
+  ListPackageBasics,
+  PackageLabels,
+  PackageVersions,
   ClearPackage,
   LaunchPackage,
   ForceStopPackage,
@@ -40,6 +42,8 @@ import {
   TestAdb,
 } from "../wailsjs/go/main/App";
 import DeviceExplorer from "./components/DeviceExplorer";
+import { createRequestGuard } from "./requestGuard";
+import { loadPackageDetails, mergePackageMetadata } from "./packageLoading";
 import "./App.css";
 
 type Tab =
@@ -63,13 +67,14 @@ type Device = {
 
 type Pkg = {
   name: string;
-  label?: string;
+  label: string;
   path?: string;
-  system?: boolean;
+  system: boolean;
   versionName?: string;
   versionCode?: number;
   disabled?: boolean;
   uninstalled?: boolean;
+  labelPending?: boolean;
 };
 type AppKindFilter = "third" | "system" | "disabled" | "uninstalled" | "all";
 type SvcKindFilter = "all" | "third" | "system" | "foreground";
@@ -139,6 +144,12 @@ export default function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [paths, setPaths] = useState<{ adb: string; scrcpy: string } | null>(null);
   const [packages, setPackages] = useState<Pkg[]>([]);
+  const [appsLoading, setAppsLoading] = useState(false);
+  const [appsDetailsLoading, setAppsDetailsLoading] = useState(false);
+  const [appsDetailsError, setAppsDetailsError] = useState("");
+  const appsRequest = useRef(createRequestGuard());
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const [pkgFilter, setPkgFilter] = useState("");
   const [appKind, setAppKind] = useState<AppKindFilter>("third");
   const [scrcpySessions, setScrcpySessions] = useState<{ serial: string; pid: number }[]>([]);
@@ -178,6 +189,7 @@ export default function App() {
   const [svcAutoRefresh, setSvcAutoRefresh] = useState(false);
   const devicesSig = useRef("");
   const logPausedRef = useRef(false);
+  const logSessionRef = useRef("");
 
   // Lightweight status for components that still expect a log callback (no bottom panel).
   const log = useCallback((_msg: string) => {
@@ -227,6 +239,51 @@ export default function App() {
     },
     [showError]
   );
+
+  const refreshPackages = useCallback(async () => {
+    if (!selected) return;
+    const serial = selected;
+    const guard = appsRequest.current;
+    const ticket = guard.begin();
+    const current = () => guard.current(ticket) && selectedRef.current === serial;
+    setAppsLoading(true);
+    setAppsDetailsLoading(false);
+    setAppsDetailsError("");
+    try {
+      const list = ((await ListPackageBasics(serial)) as Pkg[]) || [];
+      if (!current()) return;
+      setPackages(list);
+      setPkgName((name) => list.some((p) => p.name === name) ? name : "");
+      setAppsLoading(false);
+      setAppsDetailsLoading(list.length > 0);
+      void loadPackageDetails(
+        list, current,
+        async (batch) => (await PackageLabels(serial, batch)) as Pkg[],
+        async (snapshot) => (await PackageVersions(serial, snapshot)) as Pkg[],
+        (kind, updates) => setPackages((prev) =>
+          current() ? mergePackageMetadata(prev, updates, kind) : prev),
+      ).then((errors) => {
+        if (!current()) return;
+        setAppsDetailsLoading(false);
+        setAppsDetailsError(errors.join("；"));
+      });
+    } catch (error: unknown) {
+      if (current()) showError("刷新应用失败", String(error));
+    } finally {
+      if (current()) setAppsLoading(false);
+    }
+  }, [selected, showError]);
+
+  useEffect(() => {
+    const guard = appsRequest.current;
+    guard.activate();
+    setPackages([]);
+    setPkgName("");
+    setAppsLoading(false);
+    setAppsDetailsLoading(false);
+    setAppsDetailsError("");
+    return () => guard.dispose();
+  }, [selected]);
 
   const applyDevices = useCallback((list: Device[]) => {
     const next = list || [];
@@ -306,7 +363,9 @@ export default function App() {
       }
     })();
 
-    const off1 = EventsOn("logcat:line", (line: string) => {
+    const off1 = EventsOn("logcat:line", (event: { session: string; line: string }) => {
+      if (event.session !== logSessionRef.current) return;
+      const line = event.line;
       if (logPausedRef.current) {
         logBuffer.current.push(line);
         return;
@@ -317,14 +376,23 @@ export default function App() {
         return next;
       });
     });
-    const off2 = EventsOn("logcat:stopped", () => {
+    const off2 = EventsOn("logcat:stopped", (event: { session: string; reason: string; message: string }) => {
+      if (event.session !== logSessionRef.current) return;
+      logSessionRef.current = "";
       setLogRunning(false);
+      if (event.reason === "error") showError("logcat 已停止", event.message);
+    });
+
+    const off3 = EventsOn("scrcpy:error", (event: { serial: string; message: string }) => {
+      showError(`设备 ${event.serial} 投屏失败`, event.message);
+      void refreshScrcpy();
     });
 
     return () => {
       cancelled = true;
       off1();
       off2();
+      off3();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -546,7 +614,7 @@ export default function App() {
         <header className="topbar">
           <div className="device-picker">
             <label>当前设备</label>
-            <select value={selected} onChange={(e) => setSelected(e.target.value)}>
+            <select value={selected} disabled={busy} onChange={(e) => setSelected(e.target.value)}>
               <option value="">— 无 —</option>
               {devices.map((d) => (
                 <option key={d.serial} value={d.serial}>
@@ -599,7 +667,7 @@ export default function App() {
                         <td>{d.model || d.product || "—"}</td>
                         <td>{d.isWireless ? "无线" : "USB"}</td>
                         <td>
-                          <button className="btn sm" onClick={() => setSelected(d.serial)}>
+                          <button className="btn sm" disabled={busy} onClick={() => setSelected(d.serial)}>
                             选用
                           </button>
                         </td>
@@ -815,23 +883,24 @@ export default function App() {
                 />
                 <button
                   className="btn"
-                  disabled={busy || !selected}
-                  onClick={() =>
-                    run("刷新应用", async () => {
-                      if (!needDevice()) return;
-                      const list = (await ListPackages(selected, "all")) as Pkg[];
-                      setPackages(list || []);
-                      if (pkgName && !(list || []).some((p) => p.name === pkgName)) {
-                        setPkgName("");
-                      }
-                    })
-                  }
+                  disabled={busy || !selected || appsLoading}
+                  onClick={() => void refreshPackages()}
                 >
-                  刷新列表
+                  {appsLoading ? "读取列表…" : "刷新列表"}
                 </button>
+                {appsDetailsLoading && <span className="muted">后台补齐名称和版本…（列表可使用）</span>}
+                {appsDetailsError && <span className="muted" title={appsDetailsError}>部分信息读取失败，列表可使用；请重新刷新</span>}
               </div>
               <div className="row gap wrap apps-action-bar">
-                <div className="apps-selected muted">
+                <div
+                  className="apps-selected apps-selected-stable muted"
+                  title={selectedPkg ? [
+                    appDisplayName(selectedPkg), selectedPkg.name,
+                    selectedPkg.versionName,
+                    selectedPkg.versionCode ? `版本号：${selectedPkg.versionCode}` : "",
+                    appKindBadge(selectedPkg).text,
+                  ].filter(Boolean).join("\n") : undefined}
+                >
                   {selectedPkg ? (
                     <>
                       <div className="apps-selected-line1">
@@ -866,7 +935,7 @@ export default function App() {
                 <button
                   className="btn primary"
                   disabled={
-                    busy || !selected || !pkgName || !!selectedPkg?.uninstalled
+                    busy || appsLoading || !selected || !pkgName || !!selectedPkg?.uninstalled
                   }
                   onClick={() =>
                     run("启动", async () => {
@@ -880,7 +949,7 @@ export default function App() {
                 <button
                   className="btn"
                   disabled={
-                    busy || !selected || !pkgName || !!selectedPkg?.uninstalled
+                    busy || appsLoading || !selected || !pkgName || !!selectedPkg?.uninstalled
                   }
                   onClick={() =>
                     run("强制停止", async () => {
@@ -897,6 +966,7 @@ export default function App() {
                   className="btn"
                   disabled={
                     busy ||
+                    appsLoading ||
                     !selected ||
                     !pkgName ||
                     !!selectedPkg?.uninstalled ||
@@ -960,6 +1030,7 @@ export default function App() {
                   className="btn"
                   disabled={
                     busy ||
+                    appsLoading ||
                     !selected ||
                     !pkgName ||
                     !!selectedPkg?.uninstalled ||
@@ -985,7 +1056,7 @@ export default function App() {
                 </button>
                 <button
                   className="btn primary"
-                  disabled={busy || !selected || !pkgName}
+                  disabled={busy || appsLoading || !selected || !pkgName}
                   title="恢复系统应用（含小米超级小爱等关联包）"
                   onClick={() =>
                     run("恢复安装", async () => {
@@ -1031,7 +1102,7 @@ export default function App() {
                 </button>
                 <button
                   className="btn"
-                  disabled={busy || !selected || !pkgName}
+                  disabled={busy || appsLoading || !selected || !pkgName}
                   title="查看包是否安装/禁用及关联包状态"
                   onClick={() =>
                     run("应用诊断", async () => {
@@ -1047,7 +1118,7 @@ export default function App() {
                 <button
                   className="btn danger"
                   disabled={
-                    busy || !selected || !pkgName || !!selectedPkg?.uninstalled
+                    busy || appsLoading || !selected || !pkgName || !!selectedPkg?.uninstalled
                   }
                   onClick={() =>
                     run("卸载", async () => {
@@ -1089,7 +1160,7 @@ export default function App() {
                 <button
                   className="btn"
                   disabled={
-                    busy || !selected || !pkgName || !!selectedPkg?.uninstalled
+                    busy || appsLoading || !selected || !pkgName || !!selectedPkg?.uninstalled
                   }
                   onClick={() =>
                     run("清除数据", async () => {
@@ -1435,6 +1506,7 @@ export default function App() {
 
           {tab === "files" && (
             <DeviceExplorer
+              key={selected}
               serial={selected}
               busy={busy}
               setBusy={setBusy}
@@ -1636,9 +1708,20 @@ export default function App() {
                   disabled={busy || logRunning || !selected}
                   onClick={() =>
                     run("开始 logcat", async () => {
-                      await StartLogcat(selected, true);
+                      const session = crypto.randomUUID();
+                      logSessionRef.current = session;
                       setLogLines([]);
+                      logBuffer.current = [];
                       setLogRunning(true);
+                      try {
+                        await StartLogcat(selected, true, session);
+                      } catch (e) {
+                        if (logSessionRef.current === session) {
+                          logSessionRef.current = "";
+                          setLogRunning(false);
+                        }
+                        throw e;
+                      }
                     })
                   }
                 >
@@ -1646,11 +1729,12 @@ export default function App() {
                 </button>
                 <button
                   className="btn"
-                  disabled={!logRunning}
-                  onClick={() => {
-                    StopLogcat();
+                  disabled={busy || !logRunning}
+                  onClick={() => run("停止 logcat", async () => {
+                    await StopLogcat();
+                    logSessionRef.current = "";
                     setLogRunning(false);
-                  }}
+                  })}
                 >
                   停止
                 </button>
@@ -1717,7 +1801,10 @@ export default function App() {
 
           {tab === "settings" && settings && (
             <section className="panel">
-              <div className="form">
+              <div className="form settings-form">
+                <section className="settings-group" aria-labelledby="settings-general">
+                  <h3 id="settings-general">界面与任务</h3>
+                  <div className="settings-fields">
                 <label>
                   主题
                   <select
@@ -1740,7 +1827,11 @@ export default function App() {
                     }
                   />
                 </label>
-                <h3>scrcpy 默认参数</h3>
+                  </div>
+                </section>
+                <section className="settings-group" aria-labelledby="settings-scrcpy">
+                  <h3 id="settings-scrcpy">投屏默认参数</h3>
+                  <div className="settings-fields">
                 <label>
                   最大边长（0=不限）
                   <input
@@ -1768,7 +1859,9 @@ export default function App() {
                     }
                   />
                 </label>
-                <label className="chk">
+                  </div>
+                  <div className="settings-options">
+                <label className="chk settings-option">
                   <input
                     type="checkbox"
                     checked={settings.scrcpyStayAwake}
@@ -1776,17 +1869,23 @@ export default function App() {
                       setSettings({ ...settings, scrcpyStayAwake: e.target.checked })
                     }
                   />
-                  保持常亮
+                  <span className="settings-option-copy">
+                    <span>保持常亮</span>
+                    <span className="settings-option-hint">投屏期间保持设备屏幕常亮</span>
+                  </span>
                 </label>
-                <label className="chk">
+                <label className="chk settings-option">
                   <input
                     type="checkbox"
                     checked={settings.scrcpyNoAudio}
                     onChange={(e) => setSettings({ ...settings, scrcpyNoAudio: e.target.checked })}
                   />
-                  关闭音频
+                  <span className="settings-option-copy">
+                    <span>关闭音频</span>
+                    <span className="settings-option-hint">投屏时不传输设备音频</span>
+                  </span>
                 </label>
-                <label className="chk">
+                <label className="chk settings-option">
                   <input
                     type="checkbox"
                     checked={settings.killScrcpyOnExit}
@@ -1794,11 +1893,17 @@ export default function App() {
                       setSettings({ ...settings, killScrcpyOnExit: e.target.checked })
                     }
                   />
-                  退出时结束全部 scrcpy
+                  <span className="settings-option-copy">
+                    <span>退出时关闭投屏</span>
+                    <span className="settings-option-hint">退出本工具时，结束它开启的全部 scrcpy 进程</span>
+                  </span>
                 </label>
-                <div className="row gap">
+                  </div>
+                </section>
+                <div className="row gap settings-actions">
                   <button
                     className="btn primary"
+                    disabled={busy}
                     onClick={() =>
                       run("保存设置", async () => {
                         // 固定使用内置 bin/，不再允许自定义路径
@@ -1813,6 +1918,7 @@ export default function App() {
                   </button>
                   <button
                     className="btn"
+                    disabled={busy}
                     onClick={() =>
                       run("测试 adb", async () => {
                         const v = await TestAdb();

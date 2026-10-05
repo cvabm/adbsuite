@@ -2,6 +2,8 @@ module adbsuite
 
 go 1.25.0
 
+toolchain go1.26.6
+
 require (
 	github.com/google/uuid v1.6.0
 	github.com/shogo82148/androidbinary v1.0.5

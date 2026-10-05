@@ -60,6 +60,8 @@ export function LaunchPackage(arg1:string,arg2:string):Promise<string>;
 
 export function ListDevices():Promise<Array<adb.Device>>;
 
+export function ListPackageBasics(arg1:string):Promise<Array<adb.PackageInfo>>;
+
 export function ListPackages(arg1:string,arg2:string):Promise<Array<adb.PackageInfo>>;
 
 export function ListRemoteDir(arg1:string,arg2:string):Promise<string>;
@@ -75,6 +77,10 @@ export function ListScreenRecords():Promise<Array<adb.RecordSession>>;
 export function ListTasks():Promise<Array<tasks.Item>>;
 
 export function MkdirRemote(arg1:string,arg2:string):Promise<void>;
+
+export function PackageLabels(arg1:string,arg2:Array<adb.PackageInfo>):Promise<Array<adb.PackageInfo>>;
+
+export function PackageVersions(arg1:string,arg2:Array<adb.PackageInfo>):Promise<Array<adb.PackageInfo>>;
 
 export function Pair(arg1:string,arg2:string):Promise<string>;
 
@@ -104,7 +110,7 @@ export function SelectSaveFile(arg1:string,arg2:string):Promise<string>;
 
 export function Shell(arg1:string,arg2:string):Promise<string>;
 
-export function StartLogcat(arg1:string,arg2:boolean):Promise<void>;
+export function StartLogcat(arg1:string,arg2:boolean,arg3:string):Promise<void>;
 
 export function StartScrcpy(arg1:string):Promise<void>;
 

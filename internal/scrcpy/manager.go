@@ -1,11 +1,15 @@
 package scrcpy
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
+	"time"
 
 	"adbsuite/internal/procutil"
 )
@@ -26,10 +30,12 @@ type Options struct {
 }
 
 type Manager struct {
-	mu      sync.Mutex
-	bin     func() string
-	procs   map[string]*exec.Cmd
+	mu       sync.Mutex
+	bin      func() string
+	procs    map[string]*exec.Cmd
 	sessions map[string]Session
+	onExit   func(Session, error)
+	command  func(string, ...string) *exec.Cmd
 }
 
 func New(bin func() string) *Manager {
@@ -41,16 +47,38 @@ func New(bin func() string) *Manager {
 }
 
 func (m *Manager) Start(serial string, opt Options) error {
+	done, err := m.startProcess(serial, opt)
+	if err != nil {
+		return err
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("scrcpy 启动后立即退出")
+	case <-time.After(300 * time.Millisecond):
+		return nil
+	}
+}
+
+func (m *Manager) OnExit(fn func(Session, error)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onExit = fn
+}
+
+func (m *Manager) startProcess(serial string, opt Options) (<-chan error, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.procs[serial]; ok {
-		return fmt.Errorf("设备 %s 已在投屏中", serial)
+		return nil, fmt.Errorf("设备 %s 已在投屏中", serial)
 	}
 	bin := m.bin()
 	if st, err := os.Stat(bin); err != nil || st.IsDir() {
 		// may be on PATH
 		if _, err := exec.LookPath(bin); err != nil {
-			return fmt.Errorf("未找到 scrcpy: %s（请将 scrcpy 放入 bin/scrcpy/ 或在设置中指定路径）", bin)
+			return nil, fmt.Errorf("未找到 scrcpy: %s（请将 scrcpy 放入 bin/scrcpy/ 或在设置中指定路径）", bin)
 		}
 	}
 	args := []string{}
@@ -75,28 +103,53 @@ func (m *Manager) Start(serial string, opt Options) error {
 	if opt.Title != "" {
 		args = append(args, "--window-title", opt.Title)
 	}
-	cmd := exec.Command(bin, args...)
+	command := m.command
+	if command == nil {
+		command = exec.Command
+	}
+	cmd := command(bin, args...)
 	// hide console flash; scrcpy still opens its own SDL window
 	procutil.HideConsole(cmd)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	output := &procutil.Output{}
+	cmd.Stdout = output
+	cmd.Stderr = output
+	cmd.WaitDelay = 2 * time.Second
 	// workdir = scrcpy folder so DLLs resolve
 	if dir := filepathDir(bin); dir != "" {
 		cmd.Dir = dir
 	}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("启动 scrcpy 失败: %w", err)
+		return nil, fmt.Errorf("启动 scrcpy 失败: %w", err)
 	}
 	m.procs[serial] = cmd
 	m.sessions[serial] = Session{Serial: serial, PID: cmd.Process.Pid, Args: fmt.Sprintf("%v", args)}
-	go func(s string, c *exec.Cmd) {
-		_ = c.Wait()
-		m.mu.Lock()
-		delete(m.procs, s)
-		delete(m.sessions, s)
+	done := make(chan error, 1)
+	go func() {
+		err := cmd.Wait()
+		if err != nil {
+			err = fmt.Errorf("scrcpy 退出: %w；%s", err, strings.TrimSpace(output.String()))
+		}
+		m.finishProcess(serial, cmd, err)
+		done <- err
+	}()
+	return done, nil
+}
+
+func (m *Manager) finishProcess(serial string, cmd *exec.Cmd, err error) {
+	m.mu.Lock()
+	// Stop may already have removed this process and Start installed a new one.
+	if m.procs[serial] != cmd {
 		m.mu.Unlock()
-	}(serial, cmd)
-	return nil
+		return
+	}
+	session := m.sessions[serial]
+	delete(m.procs, serial)
+	delete(m.sessions, serial)
+	notify := m.onExit
+	m.mu.Unlock()
+	if notify != nil {
+		notify(session, err)
+	}
 }
 
 func filepathDir(p string) string {
@@ -115,7 +168,9 @@ func (m *Manager) Stop(serial string) error {
 	if !ok {
 		return fmt.Errorf("设备 %s 未在投屏", serial)
 	}
-	_ = killProcess(cmd)
+	if err := killProcess(cmd); err != nil {
+		return fmt.Errorf("停止 scrcpy 失败: %w", err)
+	}
 	delete(m.procs, serial)
 	delete(m.sessions, serial)
 	return nil
@@ -154,10 +209,17 @@ func killProcess(cmd *exec.Cmd) error {
 	}
 	if runtime.GOOS == "windows" {
 		// taskkill tree for scrcpy children
-		k := exec.Command("taskkill", "/PID", fmt.Sprintf("%d", cmd.Process.Pid), "/T", "/F")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		k := exec.CommandContext(ctx, "taskkill", "/PID", fmt.Sprintf("%d", cmd.Process.Pid), "/T", "/F")
 		procutil.HideConsole(k)
-		_ = k.Run()
+		if err := k.Run(); err == nil {
+			return nil
+		}
+	}
+	err := cmd.Process.Kill()
+	if errors.Is(err, os.ErrProcessDone) {
 		return nil
 	}
-	return cmd.Process.Kill()
+	return err
 }
