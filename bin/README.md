@@ -16,7 +16,15 @@ bin/platform-tools/
 
 ## scrcpy
 
-从 [scrcpy Releases](https://github.com/Genymobile/scrcpy/releases) 下载 Windows 包，解压到：
+当前内置 [scrcpy 5.0](https://github.com/Genymobile/scrcpy/releases/tag/v5.0) 的官方 Windows 64 位包，默认自动使用硬件解码，不支持时回退到软件解码。
+
+来源：[scrcpy-win64-v5.0.zip](https://github.com/Genymobile/scrcpy/releases/download/v5.0/scrcpy-win64-v5.0.zip)。官方 SHA-256：
+
+```text
+44c10d9e82f20ea67227d14d37bf9fbe3603117c5736df3f514544a02ba20a73
+```
+
+更新时完整替换下列目录，保留官方包中的 DLL、`scrcpy-server`、adb 和许可文件，避免混用不同版本：
 
 ```text
 bin/scrcpy/

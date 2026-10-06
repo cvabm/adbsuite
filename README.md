@@ -2,7 +2,7 @@
 
 基于 **Go + Wails v2 + React/TypeScript** 的 Android ADB 桌面工具。
 
-仓库已内置 `bin/platform-tools`（adb）与 `bin/scrcpy`，**一个程序目录即可使用**，无需系统 PATH，也无需在设置里配置工具路径。
+仓库已内置 `bin/platform-tools`（adb）与 `bin/scrcpy`（scrcpy 5.0 Windows 64 位官方包），**一个程序目录即可使用**，无需系统 PATH，也无需在设置里配置工具路径。投屏默认自动选择硬件解码，不支持时回退到软件解码。
 
 ## 功能
 
